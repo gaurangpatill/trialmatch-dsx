@@ -21,6 +21,8 @@ from backend.app.clinical.summaries import (
     StudySummaryService,
     SummaryError,
     _has_sufficient_evidence_overlap,
+    _official_source_fields,
+    _source_field_id,
     summary_provider_from_environment,
 )
 
@@ -44,8 +46,8 @@ def _studies():
     ]
 
 
-def _statement(text: str, path: str, quote: str) -> dict:
-    return {"text": text, "evidence": [{"source_path": path, "quote": quote}]}
+def _statement(text: str, path: str, _quote: str) -> dict:
+    return {"text": text, "evidence": [{"source_id": _source_field_id(path)}]}
 
 
 def _grounded_payload(study) -> dict:
@@ -192,6 +194,14 @@ async def test_representative_summaries_are_grounded_structured_and_cached(
     assert repository.get_current_summary(study.nct_id, study.source_hash) == (
         first.plain_language_summary
     )
+    cached_payload = repository.get_cached_summary(service.cache_key(study))
+    assert cached_payload is not None
+    official_fields = _official_source_fields(study)
+    for section_name in ("investigating", "participation", "intended_for", "important"):
+        for statement in cached_payload["grounded_sections"][section_name]["statements"]:
+            for evidence in statement["evidence"]:
+                assert evidence["quote"] in official_fields[evidence["source_path"]]
+                assert len(evidence["quote"]) <= 500
     if study_index == 2:
         assert first.plain_language_summary.count("does not") == 3
         assert "not yet recruiting" in first.plain_language_summary
@@ -206,12 +216,12 @@ async def test_summary_rejects_false_evidence_and_unsupported_claims(tmp_path):
     class BadProvider(FixtureProvider):
         async def summarize(self, current):
             payload = _grounded_payload(current)
-            payload["investigating"]["statements"][0]["evidence"][0]["quote"] = (
-                "The treatment cures everyone"
+            payload["investigating"]["statements"][0]["evidence"][0]["source_id"] = (
+                "SF_0000000000000000"
             )
             return payload
 
-    with pytest.raises(SummaryError, match="evidence absent"):
+    with pytest.raises(SummaryError, match="unknown source field identifier"):
         await StudySummaryService(repository, BadProvider()).summarize(study)
 
     class AdviceProvider(FixtureProvider):
@@ -224,6 +234,23 @@ async def test_summary_rejects_false_evidence_and_unsupported_claims(tmp_path):
 
     with pytest.raises(SummaryError, match="unsupported eligibility"):
         await StudySummaryService(repository, AdviceProvider()).summarize(study)
+    assert repository.get_current_summary(study.nct_id, study.source_hash) is None
+
+
+@pytest.mark.asyncio
+async def test_provider_source_hash_must_match_current_study(tmp_path):
+    repository = ClinicalRepository(tmp_path / "clinical.sqlite3")
+    study = _studies()[0]
+    repository.upsert_studies([study])
+
+    class StaleProvider(FixtureProvider):
+        async def summarize(self, current):
+            payload = _grounded_payload(current)
+            payload["source_hash"] = "0" * 64
+            return payload
+
+    with pytest.raises(SummaryError, match="identifiers do not match"):
+        await StudySummaryService(repository, StaleProvider()).summarize(study)
     assert repository.get_current_summary(study.nct_id, study.source_hash) is None
 
 
@@ -259,11 +286,15 @@ async def test_openai_adapter_parses_structured_output_and_retries_transient_fai
         assert body["response_format"]["type"] == "json_schema"
         schema = body["response_format"]["json_schema"]["schema"]
         statement = schema["properties"]["investigating"]["properties"]["statements"]["items"]
+        evidence_schema = statement["properties"]["evidence"]["items"]
+        assert list(evidence_schema["properties"]) == ["source_id"]
+        assert _source_field_id(_DESCRIPTION_PATH) in evidence_schema["properties"]["source_id"]["enum"]
         assert statement["properties"]["text"]["maxLength"] == 180
-        assert statement["properties"]["evidence"]["items"]["properties"]["quote"]["maxLength"] == 500
         assert statement["properties"]["text"]["description"].endswith("1-180 characters.")
-        assert "1-500 characters" in statement["properties"]["evidence"]["items"]["properties"]["quote"]["description"]
-        assert "supplied_source_fields" in json.loads(body["messages"][1]["content"])
+        prompt = json.loads(body["messages"][1]["content"])
+        supplied = prompt["supplied_source_fields"]
+        assert all(set(item) == {"source_id", "source_path", "content"} for item in supplied)
+        assert {item["source_id"] for item in supplied} == set(evidence_schema["properties"]["source_id"]["enum"])
         if calls == 1:
             return httpx.Response(429, request=request)
         return httpx.Response(
@@ -480,7 +511,7 @@ async def test_wrong_section_evidence_and_unjustified_missing_section_are_reject
             payload = _grounded_payload(current)
             statement = payload["intended_for"]["statements"][0]
             statement["evidence"] = [
-                {"source_path": _STATUS_PATH, "quote": "RECRUITING"}
+                {"source_id": _source_field_id(_STATUS_PATH)}
             ]
             return payload
 

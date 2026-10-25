@@ -19,8 +19,8 @@ from .client import ClinicalTrialsClient
 from .models import DetailRetrievalStatus, PlainLanguageSummaryPayload, Study
 from .normalize import normalize_study
 
-SCHEMA_VERSION = "2.0"
-PROMPT_VERSION = "2.0"
+SCHEMA_VERSION = "3.0"
+PROMPT_VERSION = "3.0"
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 _SECTION_ORDER = (
@@ -126,7 +126,7 @@ class SummarySection(BaseModel):
 
 
 class StructuredSummary(BaseModel):
-    """Provider output retained in the cache alongside the rendered API string."""
+    """Resolved grounding retained in the cache alongside the rendered API string."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -136,6 +136,40 @@ class StructuredSummary(BaseModel):
     participation: SummarySection
     intended_for: SummarySection
     important: SummarySection
+
+
+class SourceFieldReference(BaseModel):
+    """Provider citation resolved only against backend-assigned source identifiers."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    source_id: str = Field(pattern=r"^SF_[a-f0-9]{16}$")
+
+
+class ReferencedStatement(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    text: str = Field(min_length=1, max_length=180)
+    evidence: list[SourceFieldReference] = Field(min_length=1, max_length=3)
+
+
+class ReferencedSection(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    statements: list[ReferencedStatement] = Field(default_factory=list, max_length=1)
+
+
+class ReferencedSummary(BaseModel):
+    """Strict provider output containing references, never model-authored quotations."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    nct_id: str = Field(pattern=r"^NCT\d{8}$")
+    source_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    investigating: ReferencedSection
+    participation: ReferencedSection
+    intended_for: ReferencedSection
+    important: ReferencedSection
 
 
 class SummaryRepository(Protocol):
@@ -201,25 +235,34 @@ def _official_source_fields(study: Study) -> dict[str, str]:
     return fields
 
 
-def _structured_schema() -> dict[str, Any]:
+def _source_field_id(path: str) -> str:
+    """Return a stable opaque identifier derived only from an official field path."""
+
+    return f"SF_{hashlib.sha256(path.encode()).hexdigest()[:16]}"
+
+
+def _source_fields_by_id(study: Study) -> dict[str, tuple[str, str]]:
+    fields: dict[str, tuple[str, str]] = {}
+    for path, value in _official_source_fields(study).items():
+        source_id = _source_field_id(path)
+        if source_id in fields and fields[source_id][0] != path:
+            raise SummaryError("official source field identifier collision")
+        fields[source_id] = (path, value)
+    return fields
+
+
+def _structured_schema(source_ids: list[str]) -> dict[str, Any]:
     evidence = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "source_path": {
+            "source_id": {
                 "type": "string",
-                "minLength": 1,
-                "maxLength": 200,
-                "description": "Exact supplied field path; 1-200 characters.",
-            },
-            "quote": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 500,
-                "description": "Exact source excerpt; 1-500 characters, shortened without alteration when needed.",
+                "enum": source_ids,
+                "description": "Backend-assigned identifier for one supplied official field.",
             },
         },
-        "required": ["source_path", "quote"],
+        "required": ["source_id"],
     }
     statement = {
         "type": "object",
@@ -299,9 +342,14 @@ class OpenAISummaryProvider:
         self.last_usage: dict[str, int] = {}
 
     async def summarize(self, study: Study) -> dict[str, Any]:
-        source_fields = _official_source_fields(study)
+        source_fields = _source_fields_by_id(study)
         if not source_fields:
             raise SummaryError(f"{study.nct_id} has no official fields suitable for summarization")
+        source_ids = sorted(source_fields)
+        supplied_source_fields = [
+            {"source_id": source_id, "source_path": source_fields[source_id][0], "content": source_fields[source_id][1]}
+            for source_id in source_ids
+        ]
         body = {
             "model": self.model,
             "temperature": 0,
@@ -311,7 +359,7 @@ class OpenAISummaryProvider:
                 "json_schema": {
                     "name": "trialmatch_grounded_study_summary",
                     "strict": True,
-                    "schema": _structured_schema(),
+                    "schema": _structured_schema(source_ids),
                 },
             },
             "messages": [
@@ -320,16 +368,16 @@ class OpenAISummaryProvider:
                     "content": (
                         "Explain the supplied ClinicalTrials.gov record in concise, everyday language. "
                         "Use no knowledge beyond supplied_source_fields. Every factual statement must cite "
-                        "one to three exact supporting excerpts and their exact field paths. Use an empty "
-                        "statements list when a section is unspecified. Do not infer eligibility, treatment "
-                        "effects, procedures, duration, payment, risks, or medical advice. Do not copy long "
+                        "one to three supporting source_id values exactly as supplied. Never generate source "
+                        "paths or quotation text; the backend resolves cited identifiers to original fields. "
+                        "Use an empty statements list when a section is unspecified. Do not infer eligibility, "
+                        "treatment effects, procedures, duration, payment, risks, or medical advice. Do not copy long "
                         "technical descriptions; accurately paraphrase them. Cite investigating only from "
                         "identification, description, conditions, interventions, or outcomes modules; cite "
                         "participation only from description, design, interventions, or outcomes modules; "
                         "cite intended_for only from eligibility or conditions modules; cite important only "
                         "from status, design, description, interventions, or outcomes modules. Hard limits: "
-                        "each statement must be at most 180 characters and each exact evidence quote at most "
-                        "500 characters. Return the identifiers unchanged."
+                        "each statement must be at most 180 characters. Return the identifiers unchanged."
                     ),
                 },
                 {
@@ -338,7 +386,7 @@ class OpenAISummaryProvider:
                         {
                             "nct_id": study.nct_id,
                             "source_hash": study.source_hash,
-                            "supplied_source_fields": source_fields,
+                            "supplied_source_fields": supplied_source_fields,
                         },
                         sort_keys=True,
                     ),
@@ -456,6 +504,80 @@ def _has_sufficient_evidence_overlap(statement: str, evidence: str) -> bool:
     overlap = statement_concepts.intersection(evidence_concepts)
     required = min(2, len(statement_concepts))
     return len(overlap) >= required
+
+
+def _exact_source_excerpt(source_value: str, statement: str, max_length: int = 500) -> str:
+    """Select an exact source substring most relevant to a generated statement."""
+
+    if len(source_value) <= max_length:
+        return source_value
+    source_lower = source_value.casefold()
+    anchors = sorted(_material_stems(statement), key=len, reverse=True)
+    positions = [source_lower.find(anchor) for anchor in anchors if source_lower.find(anchor) >= 0]
+    candidates: list[str] = []
+    for position in positions or [0]:
+        start = max(0, min(position - max_length // 2, len(source_value) - max_length))
+        if start > 0:
+            next_space = source_value.find(" ", start)
+            if next_space >= 0:
+                start = next_space + 1
+        end = min(len(source_value), start + max_length)
+        if end < len(source_value):
+            previous_space = source_value.rfind(" ", start, end)
+            if previous_space > start:
+                end = previous_space
+        candidates.append(source_value[start:end].strip())
+    statement_numbers = set(re.findall(r"\d+(?:\.\d+)?", statement))
+    statement_concepts = _material_stems(statement)
+    return max(
+        candidates,
+        key=lambda candidate: (
+            len(statement_numbers.intersection(re.findall(r"\d+(?:\.\d+)?", candidate))),
+            len(statement_concepts.intersection(_material_stems(candidate))),
+        ),
+    )
+
+
+def _resolve_source_references(study: Study, raw: dict[str, Any]) -> dict[str, Any]:
+    """Resolve provider field IDs to backend-authored exact source evidence."""
+
+    try:
+        referenced = ReferencedSummary.model_validate(raw, strict=True)
+    except ValidationError as exc:
+        raise SummaryError(
+            f"summary reference output failed schema validation: {exc.error_count()} error(s)"
+        ) from exc
+    if referenced.nct_id != study.nct_id or referenced.source_hash != study.source_hash:
+        raise SummaryError("summary output identifiers do not match the current source record")
+
+    source_fields = _source_fields_by_id(study)
+    resolved: dict[str, Any] = {
+        "nct_id": referenced.nct_id,
+        "source_hash": referenced.source_hash,
+    }
+    for section_name, _ in _SECTION_ORDER:
+        resolved_statements: list[dict[str, Any]] = []
+        allowed_markers = _SECTION_PATH_MARKERS[section_name]
+        for statement in getattr(referenced, section_name).statements:
+            evidence_items: list[dict[str, str]] = []
+            for reference in statement.evidence:
+                source_field = source_fields.get(reference.source_id)
+                if source_field is None:
+                    raise SummaryError("summary output cited an unknown source field identifier")
+                source_path, source_value = source_field
+                if not any(marker in source_path for marker in allowed_markers):
+                    raise SummaryError("summary output cites evidence from the wrong section")
+                evidence_items.append(
+                    {
+                        "source_path": source_path,
+                        "quote": _exact_source_excerpt(source_value, statement.text),
+                    }
+                )
+            resolved_statements.append(
+                {"text": statement.text, "evidence": evidence_items}
+            )
+        resolved[section_name] = {"statements": resolved_statements}
+    return resolved
 
 
 def _validate_structured_summary(study: Study, raw: dict[str, Any]) -> StructuredSummary:
@@ -616,7 +738,9 @@ class StudySummaryService:
         await self._generation_budget.claim()
         async with self._semaphore:
             raw = await self.provider.summarize(study)
-        structured = _validate_structured_summary(study, raw)
+        structured = _validate_structured_summary(
+            study, _resolve_source_references(study, raw)
+        )
         payload = PlainLanguageSummaryPayload(
             nct_id=study.nct_id,
             source_hash=study.source_hash,
@@ -671,7 +795,9 @@ class StudySummaryService:
     def _validate(study: Study, raw: dict[str, Any]) -> PlainLanguageSummaryPayload:
         """Compatibility validation entry point used by callers and focused tests."""
 
-        structured = _validate_structured_summary(study, raw)
+        structured = _validate_structured_summary(
+            study, _resolve_source_references(study, raw)
+        )
         return PlainLanguageSummaryPayload(
             nct_id=study.nct_id,
             source_hash=study.source_hash,
