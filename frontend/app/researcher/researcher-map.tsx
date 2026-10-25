@@ -93,7 +93,7 @@ function createLabelImage(label: string, color: string): ImageData {
 
 function addLocalLabelImages(map: MapLibreMap) {
   for (let value = 1; value <= 20; value += 1) {
-    if (!map.hasImage(`selection-label-${value}`)) map.addImage(`selection-label-${value}`, createLabelImage(String(value), "#451a03"), {pixelRatio: 2});
+    if (!map.hasImage(`selection-label-${value}`)) map.addImage(`selection-label-${value}`, createLabelImage(String(value), "#141C35"), {pixelRatio: 2});
   }
 }
 
@@ -209,8 +209,8 @@ export default function ResearcherMap({data, selectedLocations, coveredIds, subm
       map.addSource(CATCHMENT_SOURCE, {type: "geojson", data: catchmentData(current.selectedLocations, current.submittedRadiusKm)});
       map.addSource(MUNICIPALITY_SOURCE, {type: "geojson", data: municipalityData(current.data, current.selectedLocations, current.coveredIds, current.visualizationMode, current.activeFeatureId)});
       map.addSource(SITE_SOURCE, {type: "geojson", data: siteData(current.data), cluster: true, clusterMaxZoom: 13, clusterRadius: 34});
-      map.addLayer({id: CATCHMENT_FILL, type: "fill", source: CATCHMENT_SOURCE, paint: {"fill-color": "#0b766e", "fill-opacity": 0.14}});
-      map.addLayer({id: CATCHMENT_LINE, type: "line", source: CATCHMENT_SOURCE, paint: {"line-color": "#0b766e", "line-width": 1.4, "line-dasharray": [3, 2]}});
+      map.addLayer({id: CATCHMENT_FILL, type: "fill", source: CATCHMENT_SOURCE, paint: {"fill-color": "#141C35", "fill-opacity": 0.14}});
+      map.addLayer({id: CATCHMENT_LINE, type: "line", source: CATCHMENT_SOURCE, paint: {"line-color": "#141C35", "line-width": 1.4, "line-dasharray": [3, 2]}});
       map.addLayer({
         id: UNCOVERED_LAYER,
         type: "circle",
@@ -218,20 +218,20 @@ export default function ResearcherMap({data, selectedLocations, coveredIds, subm
         filter: ["all", ["==", ["get", "selected"], 0], ["any", ["==", ["get", "mode_planning"], 0], ["==", ["get", "covered"], 0]]],
         paint: {
           "circle-radius": ["case", ["==", ["get", "mode_planning"], 1], 4.5, 6],
-          "circle-color": ["case", ["==", ["get", "mode_planning"], 1], "#cbd5e1", ["==", ["get", "access_available"], 0], "#94a3b8", ["==", ["get", "nearby_nct_count"], 0], "#f59e0b", "#0b766e"],
+          "circle-color": ["case", ["==", ["get", "mode_planning"], 1], "#F0ECE3", ["==", ["get", "access_available"], 0], "#5F6675", ["==", ["get", "nearby_nct_count"], 0], "#F6E7A8", "#141C35"],
           "circle-opacity": 0.9,
           "circle-stroke-width": 1.2,
-          "circle-stroke-color": "#ffffff",
+          "circle-stroke-color": "#FFFDF8",
         },
       });
-      map.addLayer({id: COVERED_LAYER, type: "circle", source: MUNICIPALITY_SOURCE, filter: ["all", ["==", ["get", "mode_planning"], 1], ["==", ["get", "covered"], 1], ["==", ["get", "selected"], 0]], paint: {"circle-radius": 5.5, "circle-color": "#34d399", "circle-opacity": 0.9, "circle-stroke-width": 1.2, "circle-stroke-color": "#ffffff"}});
-      map.addLayer({id: SITE_CLUSTER_LAYER, type: "circle", source: SITE_SOURCE, filter: ["has", "point_count"], paint: {"circle-color": "#11211f", "circle-radius": ["step", ["get", "point_count"], 10, 10, 12, 30, 14], "circle-stroke-color": "#ffffff", "circle-stroke-width": 1.5, "circle-opacity": 0.88}});
-      map.addLayer({id: SITE_CLUSTER_COUNT_LAYER, type: "symbol", source: SITE_SOURCE, filter: ["has", "point_count"], layout: {"text-field": ["get", "point_count_abbreviated"], "text-size": 9, "text-allow-overlap": true}, paint: {"text-color": "#ffffff"}});
-      map.addLayer({id: SITE_LAYER, type: "circle", source: SITE_SOURCE, filter: ["!", ["has", "point_count"]], paint: {"circle-radius": 4.5, "circle-color": "#11211f", "circle-stroke-color": "#ffffff", "circle-stroke-width": 1.2}});
-      map.addLayer({id: SITE_LABEL_LAYER, type: "symbol", source: SITE_SOURCE, filter: ["!", ["has", "point_count"]], layout: {"text-field": "+", "text-size": 8, "text-allow-overlap": true}, paint: {"text-color": "#ffffff"}});
-      map.addLayer({id: SELECTED_RING_LAYER, type: "circle", source: MUNICIPALITY_SOURCE, filter: ["==", ["get", "selected"], 1], paint: {"circle-radius": 14, "circle-color": "#f59e0b", "circle-stroke-color": "#78350f", "circle-stroke-width": 3}});
+      map.addLayer({id: COVERED_LAYER, type: "circle", source: MUNICIPALITY_SOURCE, filter: ["all", ["==", ["get", "mode_planning"], 1], ["==", ["get", "covered"], 1], ["==", ["get", "selected"], 0]], paint: {"circle-radius": 5.5, "circle-color": "#34d399", "circle-opacity": 0.9, "circle-stroke-width": 1.2, "circle-stroke-color": "#FFFDF8"}});
+      map.addLayer({id: SITE_CLUSTER_LAYER, type: "circle", source: SITE_SOURCE, filter: ["has", "point_count"], paint: {"circle-color": "#7C8398", "circle-radius": ["step", ["get", "point_count"], 10, 10, 12, 30, 14], "circle-stroke-color": "#FFFDF8", "circle-stroke-width": 1.5, "circle-opacity": 0.88}});
+      map.addLayer({id: SITE_CLUSTER_COUNT_LAYER, type: "symbol", source: SITE_SOURCE, filter: ["has", "point_count"], layout: {"text-field": ["get", "point_count_abbreviated"], "text-size": 9, "text-allow-overlap": true}, paint: {"text-color": "#FFFDF8"}});
+      map.addLayer({id: SITE_LAYER, type: "circle", source: SITE_SOURCE, filter: ["!", ["has", "point_count"]], paint: {"circle-radius": 4.5, "circle-color": "#7C8398", "circle-stroke-color": "#FFFDF8", "circle-stroke-width": 1.2}});
+      map.addLayer({id: SITE_LABEL_LAYER, type: "symbol", source: SITE_SOURCE, filter: ["!", ["has", "point_count"]], layout: {"text-field": "+", "text-size": 8, "text-allow-overlap": true}, paint: {"text-color": "#FFFDF8"}});
+      map.addLayer({id: SELECTED_RING_LAYER, type: "circle", source: MUNICIPALITY_SOURCE, filter: ["==", ["get", "selected"], 1], paint: {"circle-radius": 14, "circle-color": "#F6E7A8", "circle-stroke-color": "#141C35", "circle-stroke-width": 3}});
       map.addLayer({id: SELECTED_LABEL_LAYER, type: "symbol", source: MUNICIPALITY_SOURCE, filter: ["==", ["get", "selected"], 1], layout: {"icon-image": ["concat", "selection-label-", ["to-string", ["get", "selection_order"]]], "icon-size": 1, "icon-allow-overlap": true}});
-      map.addLayer({id: ACTIVE_COMMUNITY_LAYER, type: "circle", source: MUNICIPALITY_SOURCE, filter: ["==", ["get", "active"], 1], paint: {"circle-radius": 18, "circle-color": "rgba(0,0,0,0)", "circle-stroke-color": "#11211f", "circle-stroke-width": 3}});
+      map.addLayer({id: ACTIVE_COMMUNITY_LAYER, type: "circle", source: MUNICIPALITY_SOURCE, filter: ["==", ["get", "active"], 1], paint: {"circle-radius": 18, "circle-color": "rgba(0,0,0,0)", "circle-stroke-color": "#1F2430", "circle-stroke-width": 3}});
 
       const handleMunicipalityClick = (event: maplibregl.MapLayerMouseEvent) => {
         const mapFeature = event.features?.[0];
@@ -303,7 +303,7 @@ export default function ResearcherMap({data, selectedLocations, coveredIds, subm
   const toggle = (key: keyof LayerVisibility) => setLayers((current) => ({...current, [key]: !current[key]}));
   return <div className={styles.mapFrame}>
     <div ref={containerRef} className={styles.map} role="region" tabIndex={0} aria-label="Interactive Massachusetts map. Use map controls to zoom and pan, toggle layers, and select community markers for details." data-map-status={mapStatus} data-municipality-count={resolvedMunicipalityCount} data-site-count={resolvedSiteCount} data-selected-count={selectedLocations.length} data-covered-count={coveredIds.size} />
-    <fieldset className={styles.layerControls}><legend>Map layers</legend><label><input type="checkbox" checked={layers.communities} onChange={() => toggle("communities")} /> Communities</label><label><input type="checkbox" checked={layers.sites} onChange={() => toggle("sites")} /> Recruiting locations</label>{visualizationMode === "planning" && <label><input type="checkbox" checked={layers.reach} onChange={() => toggle("reach")} /> Modeled event reach</label>}</fieldset>
+    <div className={styles.layerControls} role="group" aria-labelledby="map-layers-title"><div className={styles.layerControlsTitle} id="map-layers-title">Map layers</div><label><input type="checkbox" checked={layers.communities} onChange={() => toggle("communities")} /> Communities</label><label><input type="checkbox" checked={layers.sites} onChange={() => toggle("sites")} /> Recruiting locations</label>{visualizationMode === "planning" && <label><input type="checkbox" checked={layers.reach} onChange={() => toggle("reach")} /> Modeled event reach</label>}</div>
     <div className={styles.legend} aria-label={`${visualizationMode === "access" ? "Trial access" : "Outreach"} map legend`}><div className={styles.legendTitle}>{visualizationMode === "access" ? "Trial access" : "Outreach plan"}</div>{visualizationMode === "access" ? <><div className={styles.legendRow}><i className={styles.dot} /> Nearby trial found</div><div className={styles.legendRow}><i className={`${styles.dot} ${styles.dotGap}`} /> No nearby trial found</div><div className={styles.legendRow}><i className={`${styles.dot} ${styles.dotUnavailable}`} /> Access unavailable</div>{layers.sites && <div className={styles.legendRow}><i className={`${styles.dot} ${styles.dotSite}`} /> Recruiting location</div>}</> : <><div className={styles.legendRow}><i className={`${styles.dot} ${styles.dotSelected}`} /> Recommended outreach area</div>{layers.reach && <div className={styles.legendRow}><i className={styles.legendCatchment} /> Within modeled event reach</div>}<div className={styles.legendRow}><i className={`${styles.dot} ${styles.dotOutside}`} /> Outside modeled event reach</div></>}</div>
     <div className={`${styles.mapStatus} ${mapStatus === "error" ? styles.mapStatusError : ""}`} role={mapStatus === "error" ? "alert" : "status"}>{mapStatus === "initializing" ? "Initializing map…" : mapStatus === "ready" ? "Interactive map ready" : `Map error: ${mapError ?? "Unknown rendering failure"}`}</div>
   </div>;
