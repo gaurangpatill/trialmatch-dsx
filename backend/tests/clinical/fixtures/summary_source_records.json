@@ -1,0 +1,92 @@
+[
+  {
+    "protocolSection": {
+      "identificationModule": {
+        "nctId": "NCT90000001",
+        "briefTitle": "Synthetic Study of Therapy A for Advanced Lung Cancer"
+      },
+      "statusModule": {
+        "overallStatus": "RECRUITING"
+      },
+      "descriptionModule": {
+        "briefSummary": "This randomized study compares investigational Therapy A with standard chemotherapy in adults with advanced non-small cell lung cancer.",
+        "detailedDescription": "The study measures progression-free survival and records adverse events during treatment."
+      },
+      "conditionsModule": {
+        "conditions": ["Non-small cell lung cancer"]
+      },
+      "designModule": {
+        "studyType": "INTERVENTIONAL",
+        "phases": ["PHASE2"],
+        "enrollmentInfo": {"count": 120, "type": "ESTIMATED"}
+      },
+      "armsInterventionsModule": {
+        "interventions": [
+          {
+            "type": "DRUG",
+            "name": "Therapy A",
+            "description": "Therapy A is given by intravenous infusion every 3 weeks for up to 6 cycles."
+          },
+          {
+            "type": "DRUG",
+            "name": "Standard chemotherapy"
+          }
+        ]
+      },
+      "outcomesModule": {
+        "primaryOutcomes": [
+          {"measure": "Progression-free survival", "timeFrame": "Up to 18 months"}
+        ]
+      },
+      "eligibilityModule": {
+        "eligibilityCriteria": "Adults with confirmed advanced non-small cell lung cancer and measurable disease may be considered. Additional criteria apply.",
+        "minimumAge": "18 Years",
+        "sex": "ALL"
+      }
+    }
+  },
+  {
+    "protocolSection": {
+      "identificationModule": {
+        "nctId": "NCT90000002",
+        "briefTitle": "Synthetic Heart Health Follow-up Study"
+      },
+      "statusModule": {
+        "overallStatus": "ENROLLING_BY_INVITATION"
+      },
+      "descriptionModule": {
+        "briefSummary": "This observational study examines how daily activity and blood pressure relate to heart health over time.",
+        "detailedDescription": "Participants complete health questionnaires, wear an activity monitor for 7 days, and have blood pressure measured at a study visit. No treatment is assigned by the study."
+      },
+      "conditionsModule": {
+        "conditions": ["Cardiovascular health"]
+      },
+      "designModule": {
+        "studyType": "OBSERVATIONAL",
+        "observationalModel": "COHORT",
+        "timePerspective": "PROSPECTIVE"
+      },
+      "eligibilityModule": {
+        "studyPopulation": "Adults previously seen in participating primary care clinics.",
+        "samplingMethod": "NON_PROBABILITY_SAMPLE",
+        "minimumAge": "40 Years",
+        "maximumAge": "85 Years",
+        "sex": "ALL"
+      }
+    }
+  },
+  {
+    "protocolSection": {
+      "identificationModule": {
+        "nctId": "NCT90000003",
+        "briefTitle": "Synthetic Study With Limited Public Details"
+      },
+      "statusModule": {
+        "overallStatus": "NOT_YET_RECRUITING"
+      },
+      "designModule": {
+        "studyType": "OBSERVATIONAL"
+      }
+    }
+  }
+]
