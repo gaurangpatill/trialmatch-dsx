@@ -31,6 +31,9 @@ _ELIGIBILITY_PATH = "protocolSection.eligibilityModule.eligibilityCriteria"
 _POPULATION_PATH = "protocolSection.eligibilityModule.studyPopulation"
 _STATUS_PATH = "protocolSection.statusModule.overallStatus"
 _INTERVENTION_PATH = "protocolSection.armsInterventionsModule.interventions[0].description"
+_DESIGN_PATH = "protocolSection.designModule.studyType"
+_CONDITION_PATH = "protocolSection.conditionsModule.conditions[0]"
+_TITLE_PATH = "protocolSection.identificationModule.briefTitle"
 
 
 def _studies():
@@ -427,6 +430,43 @@ async def test_valid_but_unrelated_evidence_cannot_support_an_invented_claim(tmp
 
     with pytest.raises(SummaryError, match="unsupported eligibility or medical claim"):
         await StudySummaryService(repository, UnrelatedEvidenceProvider()).summarize(study)
+
+
+@pytest.mark.asyncio
+async def test_semantically_valid_cross_section_module_citations_are_accepted(tmp_path):
+    study = _studies()[0]
+    payload = _grounded_payload(study)
+    payload["investigating"]["statements"] = [
+        _statement(
+            "This study investigates Therapy A for advanced lung cancer.",
+            _TITLE_PATH,
+            "Synthetic Study of Therapy A for Advanced Lung Cancer",
+        )
+    ]
+    payload["participation"]["statements"] = [
+        _statement(
+            "ClinicalTrials.gov lists this as an interventional study.",
+            _DESIGN_PATH,
+            "INTERVENTIONAL",
+        )
+    ]
+    payload["intended_for"]["statements"] = [
+        _statement(
+            "The listed condition is non-small cell lung cancer.",
+            _CONDITION_PATH,
+            "Non-small cell lung cancer",
+        )
+    ]
+    payload["important"]["statements"] = [
+        _statement(
+            "Therapy A is given by intravenous infusion every 3 weeks.",
+            _INTERVENTION_PATH,
+            "Therapy A is given by intravenous infusion every 3 weeks",
+        )
+    ]
+
+    validated = StudySummaryService._validate(study, payload)
+    assert validated.nct_id == study.nct_id
 
 
 @pytest.mark.asyncio

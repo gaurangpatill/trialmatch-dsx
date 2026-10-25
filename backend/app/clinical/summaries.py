@@ -57,6 +57,21 @@ _UNSUPPORTED_PATTERNS = (
 )
 _SECTION_PATH_MARKERS = {
     "investigating": (
+        ".identificationModule.", ".descriptionModule.", ".conditionsModule.",
+        ".armsInterventionsModule.", ".outcomesModule.",
+    ),
+    "participation": (
+        ".descriptionModule.", ".designModule.", ".armsInterventionsModule.",
+        ".outcomesModule.",
+    ),
+    "intended_for": (".eligibilityModule.", ".conditionsModule."),
+    "important": (
+        ".statusModule.", ".designModule.", ".descriptionModule.",
+        ".armsInterventionsModule.", ".outcomesModule.",
+    ),
+}
+_SECTION_CONTENT_MARKERS = {
+    "investigating": (
         ".descriptionModule.", ".conditionsModule.", ".armsInterventionsModule.",
         ".outcomesModule.",
     ),
@@ -64,7 +79,10 @@ _SECTION_PATH_MARKERS = {
         ".descriptionModule.", ".armsInterventionsModule.", ".outcomesModule.",
     ),
     "intended_for": (".eligibilityModule.",),
-    "important": (".statusModule.", ".designModule.", ".descriptionModule.", ".outcomesModule."),
+    "important": (
+        ".statusModule.", ".designModule.", ".descriptionModule.",
+        ".outcomesModule.",
+    ),
 }
 # Grammar and neutral research framing are excluded only when measuring whether
 # a statement has meaningful concept overlap with its exact cited excerpts.
@@ -305,9 +323,13 @@ class OpenAISummaryProvider:
                         "one to three exact supporting excerpts and their exact field paths. Use an empty "
                         "statements list when a section is unspecified. Do not infer eligibility, treatment "
                         "effects, procedures, duration, payment, risks, or medical advice. Do not copy long "
-                        "technical descriptions; accurately paraphrase them. Hard limits: each statement must "
-                        "be at most 180 characters and each exact evidence quote at most 500 characters. Return "
-                        "the identifiers unchanged."
+                        "technical descriptions; accurately paraphrase them. Cite investigating only from "
+                        "identification, description, conditions, interventions, or outcomes modules; cite "
+                        "participation only from description, design, interventions, or outcomes modules; "
+                        "cite intended_for only from eligibility or conditions modules; cite important only "
+                        "from status, design, description, interventions, or outcomes modules. Hard limits: "
+                        "each statement must be at most 180 characters and each exact evidence quote at most "
+                        "500 characters. Return the identifiers unchanged."
                     ),
                 },
                 {
@@ -450,8 +472,9 @@ def _validate_structured_summary(study: Study, raw: dict[str, Any]) -> Structure
     for section_name, _ in _SECTION_ORDER:
         section = getattr(result, section_name)
         allowed_markers = _SECTION_PATH_MARKERS[section_name]
+        content_markers = _SECTION_CONTENT_MARKERS[section_name]
         relevant_fields = [
-            path for path in source_fields if any(marker in path for marker in allowed_markers)
+            path for path in source_fields if any(marker in path for marker in content_markers)
         ]
         if not section.statements and relevant_fields:
             raise SummaryError(
