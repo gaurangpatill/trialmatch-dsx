@@ -26,8 +26,24 @@ const summary: TrialSummary = {
 
 const detail: TrialDetail = {
   ...summary,
-  eligibility_criteria: "Confirmed diagnosis of breast cancer",
-  contacts: [],
+  eligibility_criteria: "Inclusion Criteria:\nConfirmed diagnosis of breast cancer\nAge 18 years or older",
+  locations: [{
+    facility: "Massachusetts General Hospital",
+    recruiting_status: "RECRUITING",
+    city: "Boston",
+    state: "Massachusetts",
+    postal_code: "02114",
+    country: "United States",
+    latitude: 42.35843,
+    longitude: -71.05977,
+  }],
+  contacts: [{
+    name: "Clinical Trials Office",
+    role: "CENTRAL_CONTACT",
+    phone: "617-555-0100",
+    email: "trials@example.org",
+    facility: "Massachusetts General Hospital",
+  }],
   detail_attempted_at: "2026-10-24T20:47:11Z",
   retrieval_source: "official_cache",
   retrieval_message: "Official study detail is available.",
@@ -44,19 +60,24 @@ const detail: TrialDetail = {
   },
 };
 
-describe("participant study descriptions and comparison layout", () => {
-  it("renders a plain-English card without overwhelming title or condition lists", () => {
+describe("participant study discovery and details", () => {
+  it("renders a plain-English card with details access and no screening controls", () => {
     const html = renderToStaticMarkup(
-      <TrialCard trial={summary} isSelected={false} selectionFull={false} onToggle={() => undefined} onOpen={() => undefined} />,
+      <TrialCard trial={summary} onOpen={() => undefined} />,
     );
 
     expect(html).toContain("Plain-English summary");
     expect(html).toContain("Researchers are studying arm symptoms");
     expect(html).toContain("+1 more");
     expect(html).toContain("line-clamp-2");
+    expect(html).toContain("Explore details");
+    expect(html).not.toContain("+ Select");
+    expect(html).not.toContain("✓ Selected");
+    expect(html).not.toContain("Requirements ready to check");
+    expect(html).not.toContain("Requirements need review");
   });
 
-  it("renders official brief and detailed text in expandable study details", () => {
+  it("renders source-faithful study details without screening support", () => {
     const html = renderToStaticMarkup(
       <StudyDetailPanel summary={summary} detail={detail} loading={false} error={null} onClose={() => undefined} onRefresh={() => undefined} />,
     );
@@ -65,17 +86,31 @@ describe("participant study descriptions and comparison layout", () => {
     expect(html).toContain("Official brief summary");
     expect(html).toContain("Official detailed description");
     expect(html).toContain("Participants complete questionnaires");
+    expect(html).toContain("Eligibility requirements");
+    expect(html).toContain("Confirmed diagnosis of breast cancer");
+    expect(html).toContain("Interventions");
+    expect(html).toContain("Intervention details are not included in the current TrialMatch study-detail data");
+    expect(html).toContain("Massachusetts General Hospital");
+    expect(html).toContain("Presence in the official record is verified");
+    expect(html).toContain("current enrollment, site availability");
+    expect(html).toContain("Central Contact");
+    expect(html).toContain("Call 617-555-0100");
+    expect(html).toContain("Email trials@example.org");
+    expect(html).toContain('href="https://clinicaltrials.gov/study/NCT01521741"');
+    expect(html).toContain('target="_blank"');
+    expect(html).not.toContain("Preliminary screening support");
   });
 
-  it("gives the desktop comparison content its own bounded keyboard-focusable scroller", () => {
+  it("omits the fictional example comparison sidebar while keeping discovery", () => {
     const html = renderToStaticMarkup(<PatientPortal />);
 
-    expect(html).toContain("xl:sticky");
-    expect(html).toContain("xl:max-h-[calc(100vh-6.25rem)]");
-    expect(html).toContain("xl:min-h-0");
-    expect(html).toContain("xl:overflow-y-auto");
-    expect(html).toContain("tabindex=\"0\"");
-    expect(html).toContain("Check published requirements");
-    expect(html).toContain("Studies selected for review");
+    expect(html).toContain("Explore recruiting studies");
+    expect(html).toContain("Filter and sort results");
+    expect(html).not.toContain("<aside");
+    expect(html).not.toContain("Studies selected for review");
+    expect(html).not.toContain("Fictional profile and requirement comparison controls");
+    expect(html).not.toContain("Select a study first");
+    expect(html).not.toContain("Preliminary research screening only");
+    expect(html).toContain("Research information only");
   });
 });
