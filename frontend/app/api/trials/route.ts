@@ -6,6 +6,9 @@ import {
 } from "../../../lib/server-api";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 35;
+
+const UPSTREAM_TIMEOUT_MS = 30_000;
 
 export async function GET(request: Request): Promise<Response> {
   try {
@@ -14,7 +17,7 @@ export async function GET(request: Request): Promise<Response> {
     incoming.searchParams.forEach((value, key) => upstream.searchParams.append(key, value));
     const response = await fetch(upstream, {
       cache: "no-store",
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
     });
     return upstreamResponse(response, await response.text(), isTrialSearchResponse);
   } catch (error) {

@@ -89,6 +89,7 @@ def search_trials(
         page=page,
         page_size=page_size,
     )
+    summaries, extraction_states = repository.get_search_enrichment(studies)
     return TrialSearchResponse(
         items=[
             StudySummary(
@@ -100,9 +101,7 @@ def search_trials(
                 source_description=study.source_description,
                 brief_summary=study.brief_summary,
                 detailed_description=study.detailed_description,
-                plain_language_summary=repository.get_current_summary(
-                    study.nct_id, study.source_hash
-                ),
+                plain_language_summary=summaries[study.nct_id],
                 minimum_age=study.minimum_age,
                 maximum_age=study.maximum_age,
                 sex=study.sex,
@@ -110,7 +109,9 @@ def search_trials(
                 source_url=study.source_url,
                 retrieved_at=study.retrieved_at,
                 detail_status=study.detail_status,
-                screening_coverage_status=extraction_coverage(repository, study)[0].status,
+                screening_coverage_status=extraction_coverage(
+                    repository, study, extraction_states[study.nct_id]
+                )[0].status,
             )
             for study in studies
         ],

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Callable
+from typing import Any, Callable
 
 from .database import ClinicalRepository
 from .evaluator import evaluate_criterion, missing_question
@@ -111,10 +111,14 @@ class MatchingService:
 
 
 def extraction_coverage(
-    repository: ClinicalRepository, study: Study
+    repository: ClinicalRepository,
+    study: Study,
+    extraction_state: tuple[str, dict[str, Any] | None, bool, str | None] | None = None,
 ) -> tuple[ExtractionCoverageSummary, list[str]]:
-    state, raw_payload, coverage_verified, verification_method = repository.get_extraction_state(
-        study.nct_id, study.source_hash
+    state, raw_payload, coverage_verified, verification_method = (
+        extraction_state
+        if extraction_state is not None
+        else repository.get_extraction_state(study.nct_id, study.source_hash)
     )
     if state == "accepted" and raw_payload is not None:
         try:

@@ -1014,6 +1014,97 @@ class ClinicalRepository:
         value = payload.get("plain_language_summary")
         return value if isinstance(value, str) and value.strip() else None
 
+    def get_search_enrichment(
+        self, studies: list[Study]
+    ) -> tuple[
+        dict[str, str | None],
+        dict[str, tuple[str, dict[str, Any] | None, bool, str | None]],
+    ]:
+        """Load summary and extraction metadata for one search page in one connection."""
+
+        if not studies:
+            return {}, {}
+        source_hashes = {study.nct_id: study.source_hash for study in studies}
+        pair_predicate = " OR ".join("(nct_id = ? AND source_hash = ?)" for _ in studies)
+        pair_parameters = tuple(
+            value for study in studies for value in (study.nct_id, study.source_hash)
+        )
+        ids = tuple(source_hashes)
+        id_placeholders = ",".join("?" for _ in ids)
+        summaries: dict[str, str | None] = {nct_id: None for nct_id in ids}
+        states: dict[str, tuple[str, dict[str, Any] | None, bool, str | None]] = {}
+
+        with closing(self._connect()) as connection:
+            summary_rows = connection.execute(
+                f"SELECT nct_id, payload_json FROM summary_cache WHERE {pair_predicate} "
+                "ORDER BY created_at DESC",
+                pair_parameters,
+            ).fetchall()
+            extraction_rows = connection.execute(
+                f"SELECT nct_id, payload_json, coverage_verified, coverage_verification_method "
+                f"FROM extraction_cache WHERE {pair_predicate} ORDER BY created_at DESC",
+                pair_parameters,
+            ).fetchall()
+            attempt_rows = connection.execute(
+                f"SELECT nct_id, status FROM extraction_attempts WHERE {pair_predicate} "
+                "ORDER BY id DESC",
+                pair_parameters,
+            ).fetchall()
+            stale_rows = connection.execute(
+                f"SELECT DISTINCT nct_id, source_hash FROM extraction_cache "
+                f"WHERE nct_id IN ({id_placeholders})",
+                ids,
+            ).fetchall()
+
+        seen_summaries: set[str] = set()
+        for row in summary_rows:
+            nct_id = row["nct_id"]
+            if nct_id in seen_summaries:
+                continue
+            seen_summaries.add(nct_id)
+            try:
+                payload = json.loads(row["payload_json"])
+            except json.JSONDecodeError:
+                continue
+            value = payload.get("plain_language_summary")
+            if isinstance(value, str) and value.strip():
+                summaries[nct_id] = value
+
+        for row in extraction_rows:
+            nct_id = row["nct_id"]
+            if nct_id in states:
+                continue
+            try:
+                payload = json.loads(row["payload_json"])
+            except json.JSONDecodeError:
+                states[nct_id] = ("failed", None, False, None)
+            else:
+                states[nct_id] = (
+                    "accepted",
+                    payload,
+                    bool(row["coverage_verified"]),
+                    row["coverage_verification_method"],
+                )
+
+        latest_attempts: dict[str, str] = {}
+        for row in attempt_rows:
+            latest_attempts.setdefault(row["nct_id"], row["status"])
+        stale_ids = {
+            row["nct_id"]
+            for row in stale_rows
+            if row["source_hash"] != source_hashes[row["nct_id"]]
+        }
+        for nct_id in ids:
+            if nct_id in states:
+                continue
+            if latest_attempts.get(nct_id) not in (None, "accepted"):
+                states[nct_id] = ("failed", None, False, None)
+            elif nct_id in stale_ids:
+                states[nct_id] = ("stale", None, False, None)
+            else:
+                states[nct_id] = ("not_attempted", None, False, None)
+        return summaries, states
+
     def publish_summary(
         self,
         *,

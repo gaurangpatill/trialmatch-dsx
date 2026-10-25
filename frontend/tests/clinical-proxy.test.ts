@@ -3,12 +3,64 @@ import {afterEach, describe, expect, it, vi} from "vitest";
 import {GET as GET_DETAIL} from "../app/api/trials/[nctId]/route";
 import {POST as POST_SUMMARY} from "../app/api/trials/[nctId]/summary/route";
 import {POST} from "../app/api/match/route";
-import {GET} from "../app/api/trials/route";
+import {GET, maxDuration} from "../app/api/trials/route";
+import {backendUrl} from "../lib/server-api";
+
+const validSearchPayload = {
+  items: [],
+  pagination: {page: 1, page_size: 20, total_items: 0, total_pages: 0},
+  data_freshness: {retrieved_at: "2026-10-24T18:00:00Z", source: "ClinicalTrials.gov"},
+};
 
 describe("clinical API proxies", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
+  });
+
+  it("allows a delayed search response within the 30-second upstream budget", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const fetchMock = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return Response.json(validSearchPayload);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await GET(new Request("http://trialmatch.test/api/trials?query=cancer"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(validSearchPayload);
+    expect(timeoutSpy).toHaveBeenCalledWith(30_000);
+    expect(maxDuration).toBe(35);
+  });
+
+  it("returns the existing unavailable envelope when the upstream genuinely times out", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((milliseconds) => {
+      expect(milliseconds).toBe(30_000);
+      return nativeTimeout(5);
+    });
+    vi.stubGlobal("fetch", vi.fn((_input, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {once: true});
+    })));
+
+    const response = await GET(new Request("http://trialmatch.test/api/trials"));
+    const body = await response.json();
+
+    expect(response.status).toBe(503);
+    expect(body.error.code).toBe("CLINICAL_API_UNAVAILABLE");
+    expect(body.error.retryable).toBe(true);
+  });
+
+  it("uses the server-only HTTPS backend origin", () => {
+    vi.stubEnv("TRIALMATCH_API_BASE_URL", "https://trialmatch-api.example.com");
+    vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "https://public-api.example.com");
+    expect(backendUrl("api/trials").href).toBe("https://trialmatch-api.example.com/api/trials");
+
+    vi.stubEnv("TRIALMATCH_API_BASE_URL", "http://remote-api.example.com");
+    expect(() => backendUrl("api/trials")).toThrow("HTTPS origin");
   });
 
   it("replaces malformed upstream errors with the shared sanitized envelope", async () => {

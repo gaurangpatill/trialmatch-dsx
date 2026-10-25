@@ -13,11 +13,24 @@ type ErrorEnvelope = {
 type SuccessValidator = (value: unknown) => boolean;
 
 export function backendUrl(path: string): URL {
-  const base =
+  const configuredBase =
     process.env.TRIALMATCH_API_BASE_URL ??
-    process.env.NEXT_PUBLIC_API_BASE_URL ??
-    FALLBACK_API_URL;
-  return new URL(path, base.endsWith("/") ? base : `${base}/`);
+    process.env.NEXT_PUBLIC_API_BASE_URL;
+  const base = configuredBase ?? FALLBACK_API_URL;
+  const origin = new URL(base.endsWith("/") ? base : `${base}/`);
+  const isLocalHttp =
+    origin.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(origin.hostname);
+  if (
+    (configuredBase && origin.protocol !== "https:" && !isLocalHttp) ||
+    origin.username ||
+    origin.password ||
+    origin.pathname !== "/" ||
+    origin.search ||
+    origin.hash
+  ) {
+    throw new Error("The clinical API base URL must be an HTTPS origin.");
+  }
+  return new URL(path, origin);
 }
 
 export function upstreamResponse(
