@@ -47,9 +47,11 @@ _ALLOWED_ROOTS = {
 }
 _RETRYABLE_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
 _UNSUPPORTED_PATTERNS = (
-    r"\byou (?:are|would be|will be) eligible\b",
+    r"\b(?:you|participants?|patients?|people) (?:are|would be|will be) (?:eligible|ineligible)\b",
     r"\byou should (?:join|enroll|participate)\b",
     r"\b(?:will|is guaranteed to) (?:benefit|improve|cure)\b",
+    r"\b(?:therapy|treatment|drug|intervention)\b.{0,40}\b(?:causes?|cures?|prevents?|improves?|reduces?|treats?|benefits?)\b",
+    r"\b(?:causes?|leads? to|results? in) (?:severe |serious )?(?:harm|damage|injury|illness|death)\b",
     r"\b(?:safe|risk[- ]free|no risks?)\b",
     r"\bmedical advice\b",
 )
@@ -64,9 +66,9 @@ _SECTION_PATH_MARKERS = {
     "intended_for": (".eligibilityModule.",),
     "important": (".statusModule.", ".designModule.", ".descriptionModule.", ".outcomesModule."),
 }
-# These words add grammar or plain-language framing but no new clinical fact. All
-# other material words must occur in the statement's exact cited evidence.
-_SAFE_FRAMING_WORDS = {
+# Grammar and neutral research framing are excluded only when measuring whether
+# a statement has meaningful concept overlap with its exact cited excerpts.
+_EVIDENCE_OVERLAP_STOPWORDS = {
     "a", "about", "also", "an", "and", "applies", "apply", "are", "as", "at",
     "be", "been", "being", "by", "called", "clinicaltrials", "clinicaltrials.gov",
     "does", "for", "from", "given", "has", "have", "in", "intended", "is", "it",
@@ -74,22 +76,6 @@ _SAFE_FRAMING_WORDS = {
     "participants", "people", "population", "record", "researchers", "says", "study", "than", "that",
     "the", "their", "them", "they", "this", "those", "to", "up", "was", "were",
     "what", "which", "while", "who", "with", "without",
-}
-_EQUIVALENT_WORDS = {
-    "iv": {"intravenous"},
-    "questions": {"questionnaires"},
-    "questionnaires": {"questions"},
-    "check": {"measured", "measurement"},
-    "checks": {"measured", "measurements"},
-    "answer": {"complete"},
-    "answers": {"completes"},
-    "connected": {"relate", "related", "relationship"},
-    "enrollment": {"enrolling"},
-    "visited": {"seen"},
-    "treatment": {"therapy"},
-    "treatments": {"therapies"},
-    "track": {"collect", "collected", "collecting", "maintain", "maintained", "measure", "measured", "measurements"},
-    "tracks": {"collect", "collected", "collecting", "maintain", "maintained", "measure", "measured", "measurements"},
 }
 
 
@@ -424,31 +410,30 @@ def summary_provider_from_environment() -> SummaryProvider:
 
 
 def _word_stem(word: str) -> str:
-    for suffix in ("ingly", "edly", "ing", "ed", "es", "s"):
+    for suffix in ("ingly", "edly", "ation", "ment", "ing", "ed", "es", "s"):
         if word.endswith(suffix) and len(word) > len(suffix) + 3:
             return word[: -len(suffix)]
     return word
 
 
-def _unsupported_material_words(statement: str, evidence: str) -> set[str]:
-    statement_words = set(
-        re.findall(r"[a-z][a-z0-9]*(?:\.[a-z0-9]+)*", statement.casefold())
-    )
-    evidence_words = set(
-        re.findall(r"[a-z][a-z0-9]*(?:\.[a-z0-9]+)*", evidence.casefold())
-    )
-    evidence_stems = {_word_stem(word) for word in evidence_words}
-    unsupported: set[str] = set()
-    for word in statement_words:
-        if word in _SAFE_FRAMING_WORDS or word in evidence_words:
-            continue
-        equivalents = _EQUIVALENT_WORDS.get(word, set())
-        if equivalents.intersection(evidence_words):
-            continue
-        if _word_stem(word) in evidence_stems:
-            continue
-        unsupported.add(word)
-    return unsupported
+def _material_stems(value: str) -> set[str]:
+    return {
+        _word_stem(word)
+        for word in re.findall(r"[a-z][a-z0-9]*(?:\.[a-z0-9]+)*", value.casefold())
+        if word not in _EVIDENCE_OVERLAP_STOPWORDS
+    }
+
+
+def _has_sufficient_evidence_overlap(statement: str, evidence: str) -> bool:
+    """Reject unrelated citations without requiring every paraphrase word verbatim."""
+
+    statement_concepts = _material_stems(statement)
+    if not statement_concepts:
+        return True
+    evidence_concepts = _material_stems(evidence)
+    overlap = statement_concepts.intersection(evidence_concepts)
+    required = min(2, len(statement_concepts))
+    return len(overlap) >= required
 
 
 def _validate_structured_summary(study: Study, raw: dict[str, Any]) -> StructuredSummary:
@@ -502,12 +487,11 @@ def _validate_structured_summary(study: Study, raw: dict[str, Any]) -> Structure
                 raise SummaryError(
                     "summary output contains a number absent from its cited evidence"
                 )
-            if unsupported := _unsupported_material_words(
+            if not _has_sufficient_evidence_overlap(
                 normalized_statement, joined_evidence
             ):
                 raise SummaryError(
-                    "summary output contains material words absent from its cited evidence: "
-                    + ", ".join(sorted(unsupported)[:5])
+                    "summary statement is not sufficiently supported by its cited evidence"
                 )
             copied = any(
                 normalized_statement.casefold() == item.casefold() and len(item) > 100

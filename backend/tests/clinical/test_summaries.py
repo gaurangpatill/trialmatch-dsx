@@ -20,7 +20,7 @@ from backend.app.clinical.summaries import (
     OpenAISummaryProvider,
     StudySummaryService,
     SummaryError,
-    _unsupported_material_words,
+    _has_sufficient_evidence_overlap,
     summary_provider_from_environment,
 )
 
@@ -425,7 +425,7 @@ async def test_valid_but_unrelated_evidence_cannot_support_an_invented_claim(tmp
             )
             return payload
 
-    with pytest.raises(SummaryError, match="material words absent"):
+    with pytest.raises(SummaryError, match="unsupported eligibility or medical claim"):
         await StudySummaryService(repository, UnrelatedEvidenceProvider()).summarize(study)
 
 
@@ -563,17 +563,15 @@ async def test_on_demand_uses_complete_local_official_record_without_refetch(tmp
     assert repository.get_current_summary(study.nct_id, study.source_hash) == first.plain_language_summary
 
 
-def test_grounding_accepts_track_only_for_official_collection_or_measurement_wording():
-    assert _unsupported_material_words(
-        "The study tracks arm measurements.",
-        "collecting objective arm measurements in a maintained database",
-    ) == set()
-    unsupported = _unsupported_material_words(
-        "The study tracks treatment benefits.",
-        "collecting objective measurements",
+def test_grounding_allows_plain_paraphrase_but_rejects_unrelated_evidence():
+    assert _has_sufficient_evidence_overlap(
+        "The study tracks arm measurements and symptoms over time.",
+        "collecting patient symptoms and objective arm measurements in a maintained database",
     )
-    assert "tracks" not in unsupported
-    assert "benefits" in unsupported
+    assert not _has_sufficient_evidence_overlap(
+        "Participants undergo liver surgery.",
+        "The study collects objective arm measurements and questionnaires.",
+    )
 
 
 @pytest.mark.asyncio

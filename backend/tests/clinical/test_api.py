@@ -332,7 +332,7 @@ def test_on_demand_summary_endpoint_returns_cache_provenance(study_factory, tmp_
     assert missing.json()["error"]["code"] == "TRIAL_NOT_FOUND"
 
 
-def test_on_demand_summary_endpoint_sanitizes_provider_failure(study_factory, tmp_path):
+def test_on_demand_summary_endpoint_sanitizes_provider_failure(study_factory, tmp_path, caplog):
     repository = ClinicalRepository(tmp_path / "clinical.sqlite3")
     study = study_factory()
     repository.upsert_studies([study])
@@ -351,5 +351,7 @@ def test_on_demand_summary_endpoint_sanitizes_provider_failure(study_factory, tm
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "AI_SUMMARY_UNAVAILABLE"
     assert "secret" not in response.text
+    assert "secret" not in caplog.text
+    assert "category=provider_failure" in caplog.text
     assert "AI explanation is temporarily unavailable" in response.text
     assert "You can still read the official study description" in response.text

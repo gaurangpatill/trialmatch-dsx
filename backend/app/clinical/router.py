@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import uuid
 from datetime import UTC, datetime
@@ -36,6 +37,7 @@ from .normalize import normalize_study, source_structured_criteria
 
 
 router = APIRouter(prefix="/api", tags=["clinical"])
+logger = logging.getLogger(__name__)
 RepositoryDependency = Annotated[
     ClinicalRepositoryProtocol, Depends(require_ready_repository)
 ]
@@ -192,7 +194,9 @@ async def generate_trial_summary(
     try:
         payload, from_cache = await service.summarize_nct_id(nct_id)
     except SummaryError as exc:
-        limited = "limit reached" in str(exc).casefold()
+        category = _summary_error_category(exc)
+        logger.warning("AI summary failed for %s; category=%s", nct_id, category)
+        limited = category == "generation_limit"
         return _error_response(
             status_code=429 if limited else 503,
             code="SUMMARY_RATE_LIMITED" if limited else "AI_SUMMARY_UNAVAILABLE",
@@ -287,6 +291,25 @@ def match_trials(
             ],
             retryable=False,
         )
+
+
+def _summary_error_category(exc: SummaryError) -> str:
+    """Map safe internal failures to loggable categories without model output."""
+
+    message = str(exc).casefold()
+    categories = (
+        ("request limit", "generation_limit"),
+        ("schema validation", "schema_validation"),
+        ("identifiers do not match", "identifier_mismatch"),
+        ("wrong section", "wrong_evidence_section"),
+        ("evidence absent", "evidence_not_in_source"),
+        ("unsupported eligibility or medical claim", "unsafe_clinical_assertion"),
+        ("number absent", "unsupported_number"),
+        ("not sufficiently supported", "insufficient_evidence_overlap"),
+        ("copied a long technical", "excessive_source_copy"),
+        ("official", "official_source_unavailable"),
+    )
+    return next((category for marker, category in categories if marker in message), "provider_failure")
 
 
 def _error_response(
