@@ -5,6 +5,9 @@ import {
   upstreamResponse,
 } from "../../../../../lib/server-api";
 
+const SUMMARY_UNAVAILABLE_MESSAGE =
+  "AI explanation is temporarily unavailable. You can still read the official study description.";
+
 export const dynamic = "force-dynamic";
 
 export async function POST(
@@ -21,15 +24,18 @@ export async function POST(
         signal: AbortSignal.timeout(150_000),
       },
     );
-    return upstreamResponse(
+    const body = await response.text();
+    const forwarded = upstreamResponse(
       response,
-      await response.text(),
+      body,
       isTrialSummaryGenerationResponse,
     );
+    if (!response.ok && forwarded.status === 502) {
+      return unavailableResponse(SUMMARY_UNAVAILABLE_MESSAGE);
+    }
+    return forwarded;
   } catch (error) {
     console.error("Clinical trial summary proxy failed", error);
-    return unavailableResponse(
-      "The AI summary is temporarily unavailable. The official study description remains available.",
-    );
+    return unavailableResponse(SUMMARY_UNAVAILABLE_MESSAGE);
   }
 }

@@ -155,7 +155,7 @@ export function PatientPortal() {
           ...current,
           [nctId]: reason instanceof Error
             ? reason.message
-            : "The AI summary is temporarily unavailable.",
+            : "AI explanation is temporarily unavailable. You can still read the official study description.",
         }));
       } finally {
         setSummaryLoading((current) => ({...current, [nctId]: false}));

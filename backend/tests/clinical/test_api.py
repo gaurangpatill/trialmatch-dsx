@@ -351,4 +351,5 @@ def test_on_demand_summary_endpoint_sanitizes_provider_failure(study_factory, tm
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "AI_SUMMARY_UNAVAILABLE"
     assert "secret" not in response.text
-    assert "official study description remains available" in response.text.lower()
+    assert "AI explanation is temporarily unavailable" in response.text
+    assert "You can still read the official study description" in response.text

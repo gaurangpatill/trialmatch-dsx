@@ -299,7 +299,7 @@ describe("clinical study summary proxy", () => {
     const safeError = {
       error: {
         code: "AI_SUMMARY_UNAVAILABLE",
-        message: "The AI summary is temporarily unavailable.",
+        message: "AI explanation is temporarily unavailable. You can still read the official study description.",
         details: [],
         retryable: true,
         request_id: "summary-request-1",
@@ -321,5 +321,19 @@ describe("clinical study summary proxy", () => {
     expect(JSON.stringify(await invalid.json())).not.toContain("private model output");
     expect(unavailable.status).toBe(503);
     expect(await unavailable.json()).toEqual(safeError);
+
+    fetchMock.mockResolvedValueOnce(
+      Response.json({detail: "unstructured backend failure"}, {status: 503}),
+    );
+    const malformedError = await POST_SUMMARY(
+      new Request("http://trialmatch.test", {method: "POST"}),
+      {params: Promise.resolve({nctId: "NCT00471978"})},
+    );
+    const malformedBody = await malformedError.json();
+    expect(malformedError.status).toBe(503);
+    expect(malformedBody.error.message).toBe(
+      "AI explanation is temporarily unavailable. You can still read the official study description.",
+    );
+    expect(JSON.stringify(malformedBody)).not.toContain("unstructured backend failure");
   });
 });

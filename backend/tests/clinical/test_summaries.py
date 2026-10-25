@@ -256,6 +256,8 @@ async def test_openai_adapter_parses_structured_output_and_retries_transient_fai
         assert body["response_format"]["type"] == "json_schema"
         schema = body["response_format"]["json_schema"]["schema"]
         statement = schema["properties"]["investigating"]["properties"]["statements"]["items"]
+        assert statement["properties"]["text"]["maxLength"] == 180
+        assert statement["properties"]["evidence"]["items"]["properties"]["quote"]["maxLength"] == 500
         assert statement["properties"]["text"]["description"].endswith("1-180 characters.")
         assert "1-500 characters" in statement["properties"]["evidence"]["items"]["properties"]["quote"]["description"]
         assert "supplied_source_fields" in json.loads(body["messages"][1]["content"])

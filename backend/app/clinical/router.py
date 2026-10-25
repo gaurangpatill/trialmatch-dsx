@@ -196,11 +196,7 @@ async def generate_trial_summary(
         return _error_response(
             status_code=429 if limited else 503,
             code="SUMMARY_RATE_LIMITED" if limited else "AI_SUMMARY_UNAVAILABLE",
-            message=(
-                "AI summary generation is temporarily rate-limited. The official study description remains available."
-                if limited
-                else "The AI summary is temporarily unavailable. The official study description remains available."
-            ),
+            message="AI explanation is temporarily unavailable. You can still read the official study description.",
             details=[],
             retryable=True,
         )

@@ -202,8 +202,18 @@ def _structured_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "source_path": {"type": "string", "description": "Exact supplied field path; 1-200 characters."},
-            "quote": {"type": "string", "description": "Exact source excerpt; 1-500 characters, shortened without alteration when needed."},
+            "source_path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "Exact supplied field path; 1-200 characters.",
+            },
+            "quote": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500,
+                "description": "Exact source excerpt; 1-500 characters, shortened without alteration when needed.",
+            },
         },
         "required": ["source_path", "quote"],
     }
@@ -211,7 +221,12 @@ def _structured_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "text": {"type": "string", "description": "One concise statement of 1-180 characters."},
+            "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 180,
+                "description": "One concise statement of 1-180 characters.",
+            },
             "evidence": {"type": "array", "items": evidence, "minItems": 1, "maxItems": 3},
         },
         "required": ["text", "evidence"],

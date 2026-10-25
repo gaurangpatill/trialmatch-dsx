@@ -129,7 +129,7 @@ async def summary_configuration_error_handler(
     payload = ErrorResponse(
         error=ErrorBody(
             code="AI_SUMMARY_UNAVAILABLE",
-            message="The AI summary is temporarily unavailable. The official study description remains available.",
+            message="AI explanation is temporarily unavailable. You can still read the official study description.",
             details=[],
             retryable=True,
             request_id=request.headers.get("x-request-id") or uuid.uuid4().hex,
