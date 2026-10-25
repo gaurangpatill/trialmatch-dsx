@@ -1,4 +1,4 @@
-"""Source-grounded plain-language study summaries with validated current-source caching."""
+"""Direct plain-language study explanations with best-effort current-source caching."""
 
 from __future__ import annotations
 
@@ -19,10 +19,11 @@ from .client import ClinicalTrialsClient
 from .models import DetailRetrievalStatus, PlainLanguageSummaryPayload, Study
 from .normalize import normalize_study
 
-SCHEMA_VERSION = "3.0"
-PROMPT_VERSION = "3.0"
+SCHEMA_VERSION = "4.0"
+PROMPT_VERSION = "4.0"
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+_RETRYABLE_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
 _SECTION_ORDER = (
     ("investigating", "What is this study investigating?"),
     ("participation", "What might participation involve?"),
@@ -30,12 +31,12 @@ _SECTION_ORDER = (
     ("important", "Important things to know."),
 )
 _MISSING_SECTION_TEXT = {
-    "investigating": "The official record does not provide enough detail to explain the study question.",
-    "participation": "The official record does not specify what participation would involve.",
-    "intended_for": "The official record does not provide enough detail to describe who the study is intended for.",
-    "important": "The official record does not provide additional important details for a plain-language summary.",
+    "investigating": "The official record does not provide enough information to explain the study question.",
+    "participation": "The official record does not clearly describe what participation may involve.",
+    "intended_for": "The official record does not provide enough information to describe the intended participants.",
+    "important": "The official record does not provide additional details for this section.",
 }
-_ALLOWED_ROOTS = {
+_SOURCE_MODULES = (
     "identificationModule",
     "statusModule",
     "descriptionModule",
@@ -44,143 +45,30 @@ _ALLOWED_ROOTS = {
     "armsInterventionsModule",
     "outcomesModule",
     "eligibilityModule",
-}
-_RETRYABLE_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
-_UNSUPPORTED_PATTERNS = (
-    r"\b(?:you|participants?|patients?|people) (?:are|would be|will be) (?:eligible|ineligible)\b",
-    r"\byou should (?:join|enroll|participate)\b",
-    r"\b(?:will|is guaranteed to) (?:benefit|improve|cure)\b",
-    r"\b(?:therapy|treatment|drug|intervention)\b.{0,40}\b(?:causes?|cures?|prevents?|improves?|reduces?|treats?|benefits?)\b",
-    r"\b(?:causes?|leads? to|results? in) (?:severe |serious )?(?:harm|damage|injury|illness|death)\b",
-    r"\b(?:safe|risk[- ]free|no risks?)\b",
-    r"\bmedical advice\b",
 )
-_SECTION_PATH_MARKERS = {
-    "investigating": (
-        ".identificationModule.", ".descriptionModule.", ".conditionsModule.",
-        ".armsInterventionsModule.", ".outcomesModule.",
-    ),
-    "participation": (
-        ".descriptionModule.", ".designModule.", ".armsInterventionsModule.",
-        ".outcomesModule.",
-    ),
-    "intended_for": (".eligibilityModule.", ".conditionsModule."),
-    "important": (
-        ".statusModule.", ".designModule.", ".descriptionModule.",
-        ".armsInterventionsModule.", ".outcomesModule.",
-    ),
-}
-_SECTION_CONTENT_MARKERS = {
-    "investigating": (
-        ".descriptionModule.", ".conditionsModule.", ".armsInterventionsModule.",
-        ".outcomesModule.",
-    ),
-    "participation": (
-        ".descriptionModule.", ".armsInterventionsModule.", ".outcomesModule.",
-    ),
-    "intended_for": (".eligibilityModule.",),
-    "important": (
-        ".statusModule.", ".designModule.", ".descriptionModule.",
-        ".outcomesModule.",
-    ),
-}
-# Grammar and neutral research framing are excluded only when measuring whether
-# a statement has meaningful concept overlap with its exact cited excerpts.
-_EVIDENCE_OVERLAP_STOPWORDS = {
-    "a", "about", "also", "an", "and", "applies", "apply", "are", "as", "at",
-    "be", "been", "being", "by", "called", "clinicaltrials", "clinicaltrials.gov",
-    "does", "for", "from", "given", "has", "have", "in", "intended", "is", "it",
-    "its", "lists", "looking", "many", "may", "might", "not", "of", "on", "or", "other",
-    "participants", "people", "population", "record", "researchers", "says", "study", "than", "that",
-    "the", "their", "them", "they", "this", "those", "to", "up", "was", "were",
-    "what", "which", "while", "who", "with", "without",
-}
 
 
 class SummaryError(RuntimeError):
     """Safe summary-generation failure without provider secrets or response bodies."""
 
 
-class SourceEvidence(BaseModel):
-    """An exact excerpt from one allowlisted official ClinicalTrials.gov field."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    source_path: str = Field(min_length=1, max_length=200)
-    quote: str = Field(min_length=1, max_length=500)
-
-
-class GroundedStatement(BaseModel):
-    """One plain-language statement and the official text supporting it."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    text: str = Field(min_length=1, max_length=180)
-    evidence: list[SourceEvidence] = Field(min_length=1, max_length=3)
-
-
-class SummarySection(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    statements: list[GroundedStatement] = Field(default_factory=list, max_length=1)
-
-
-class StructuredSummary(BaseModel):
-    """Resolved grounding retained in the cache alongside the rendered API string."""
+class GeneratedExplanation(BaseModel):
+    """Minimal structured model response; no model-authored evidence metadata."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     nct_id: str = Field(pattern=r"^NCT\d{8}$")
     source_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
-    investigating: SummarySection
-    participation: SummarySection
-    intended_for: SummarySection
-    important: SummarySection
-
-
-class SourceFieldReference(BaseModel):
-    """Provider citation resolved only against backend-assigned source identifiers."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    source_id: str = Field(pattern=r"^SF_[a-f0-9]{16}$")
-
-
-class ReferencedStatement(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    text: str = Field(min_length=1, max_length=180)
-    evidence: list[SourceFieldReference] = Field(min_length=1, max_length=3)
-
-
-class ReferencedSection(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    statements: list[ReferencedStatement] = Field(default_factory=list, max_length=1)
-
-
-class ReferencedSummary(BaseModel):
-    """Strict provider output containing references, never model-authored quotations."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    nct_id: str = Field(pattern=r"^NCT\d{8}$")
-    source_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
-    investigating: ReferencedSection
-    participation: ReferencedSection
-    intended_for: ReferencedSection
-    important: ReferencedSection
+    investigating: str = Field(min_length=1)
+    participation: str = Field(min_length=1)
+    intended_for: str = Field(min_length=1)
+    important: str = Field(min_length=1)
 
 
 class SummaryRepository(Protocol):
-    """Storage operations required by summary generation across SQLite/PostgreSQL."""
-
     def get_study(self, nct_id: str) -> Study | None: ...
-
     def upsert_studies(self, studies: list[Study]) -> int: ...
-
     def get_cached_summary(self, cache_key: str) -> dict[str, Any] | None: ...
-
     def publish_summary(self, **kwargs: Any) -> None: ...
 
 
@@ -188,16 +76,14 @@ class SummaryProvider(Protocol):
     name: str
     model: str
 
-    async def summarize(self, study: Study) -> dict[str, Any]: ...
+    async def summarize(self, study: Study) -> str: ...
 
 
 class DisabledSummaryProvider:
-    """Explicit offline provider used by default and throughout automated tests."""
-
     name = "disabled"
     model = "disabled"
 
-    async def summarize(self, study: Study) -> dict[str, Any]:
+    async def summarize(self, study: Study) -> str:
         raise SummaryError(
             f"LLM provider is disabled; no cached summary is available for {study.nct_id}"
         )
@@ -207,85 +93,21 @@ def _normalized_text(value: str) -> str:
     return " ".join(value.split())
 
 
-def _official_source_fields(study: Study) -> dict[str, str]:
-    """Flatten only summary-relevant official protocol fields into prompt evidence."""
+def _official_study_information(study: Study) -> dict[str, Any]:
+    """Select actual official modules needed for a participant explanation."""
 
-    protocol = study.raw_source.get("protocolSection", {})
+    protocol = study.raw_source.get("protocolSection")
     if not isinstance(protocol, dict):
         return {}
-    fields: dict[str, str] = {}
-
-    def visit(value: Any, path: str) -> None:
-        if isinstance(value, str):
-            cleaned = _normalized_text(value)
-            if cleaned:
-                fields[path] = cleaned
-        elif isinstance(value, (int, float, bool)):
-            fields[path] = str(value)
-        elif isinstance(value, list):
-            for index, item in enumerate(value):
-                visit(item, f"{path}[{index}]")
-        elif isinstance(value, dict):
-            for key, item in value.items():
-                visit(item, f"{path}.{key}" if path else key)
-
-    for root in sorted(_ALLOWED_ROOTS):
-        if root in protocol:
-            visit(protocol[root], f"protocolSection.{root}")
-    return fields
-
-
-def _source_field_id(path: str) -> str:
-    """Return a stable opaque identifier derived only from an official field path."""
-
-    return f"SF_{hashlib.sha256(path.encode()).hexdigest()[:16]}"
-
-
-def _source_fields_by_id(study: Study) -> dict[str, tuple[str, str]]:
-    fields: dict[str, tuple[str, str]] = {}
-    for path, value in _official_source_fields(study).items():
-        source_id = _source_field_id(path)
-        if source_id in fields and fields[source_id][0] != path:
-            raise SummaryError("official source field identifier collision")
-        fields[source_id] = (path, value)
-    return fields
-
-
-def _structured_schema(source_ids: list[str]) -> dict[str, Any]:
-    evidence = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "source_id": {
-                "type": "string",
-                "enum": source_ids,
-                "description": "Backend-assigned identifier for one supplied official field.",
-            },
-        },
-        "required": ["source_id"],
+    return {
+        module: protocol[module]
+        for module in _SOURCE_MODULES
+        if module in protocol and isinstance(protocol[module], dict)
     }
-    statement = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "text": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 180,
-                "description": "One concise statement of 1-180 characters.",
-            },
-            "evidence": {"type": "array", "items": evidence, "minItems": 1, "maxItems": 3},
-        },
-        "required": ["text", "evidence"],
-    }
-    section = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "statements": {"type": "array", "items": statement, "maxItems": 1},
-        },
-        "required": ["statements"],
-    }
+
+
+def _explanation_schema() -> dict[str, Any]:
+    section = {"type": "string", "minLength": 1}
     return {
         "type": "object",
         "additionalProperties": False,
@@ -298,8 +120,68 @@ def _structured_schema(source_ids: list[str]) -> dict[str, Any]:
     }
 
 
+def _render_sections(sections: dict[str, str]) -> str:
+    return "\n\n".join(
+        f"{heading} {_normalized_text(sections.get(name, '')) or _MISSING_SECTION_TEXT[name]}"
+        for name, heading in _SECTION_ORDER
+    )
+
+
+def _parse_generated_content(study: Study, content: str) -> str:
+    """Normalize strict JSON when available and retain readable plain text otherwise."""
+
+    cleaned = content.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    if not cleaned:
+        raise SummaryError("OpenAI returned an empty explanation")
+
+    try:
+        raw = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return cleaned
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    if not isinstance(raw, dict):
+        raise SummaryError("OpenAI returned an unusable explanation")
+
+    returned_nct_id = raw.get("nct_id")
+    returned_source_hash = raw.get("source_hash")
+    if returned_nct_id is not None and returned_nct_id != study.nct_id:
+        raise SummaryError("OpenAI explanation NCT identifier mismatch")
+    if returned_source_hash is not None and returned_source_hash != study.source_hash:
+        raise SummaryError("OpenAI explanation source hash mismatch")
+
+    try:
+        structured = GeneratedExplanation.model_validate(raw, strict=True)
+    except ValidationError:
+        direct = raw.get("plain_language_summary") or raw.get("explanation") or raw.get("summary")
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+        aliases = {
+            "investigating": ("investigating", "what_is_this_study_investigating"),
+            "participation": ("participation", "what_might_participation_involve"),
+            "intended_for": ("intended_for", "who_is_the_study_intended_for"),
+            "important": ("important", "important_things_to_know"),
+        }
+        sections: dict[str, str] = {}
+        for name, keys in aliases.items():
+            value = next((raw.get(key) for key in keys if isinstance(raw.get(key), str)), "")
+            sections[name] = value.strip() if isinstance(value, str) else ""
+        if any(sections.values()):
+            return _render_sections(sections)
+        raise SummaryError("OpenAI returned an unusable explanation")
+
+    if structured.nct_id != study.nct_id:
+        raise SummaryError("OpenAI explanation NCT identifier mismatch")
+    if structured.source_hash != study.source_hash:
+        raise SummaryError("OpenAI explanation source hash mismatch")
+    return _render_sections(structured.model_dump())
+
+
 class OpenAISummaryProvider:
-    """OpenAI structured-output adapter with bounded retries and sanitized failures."""
+    """One-request OpenAI adapter with simple usable-output normalization."""
 
     name = "openai"
 
@@ -323,12 +205,7 @@ class OpenAISummaryProvider:
             raise SummaryError("LLM_BASE_URL must be an absolute HTTP(S) URL")
         if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
             raise SummaryError("remote LLM_BASE_URL must use HTTPS to protect credentials")
-        if (
-            timeout_seconds <= 0
-            or max_retries < 0
-            or max_retry_delay_seconds <= 0
-            or max_http_requests < 1
-        ):
+        if timeout_seconds <= 0 or max_retries < 0 or max_retry_delay_seconds <= 0 or max_http_requests < 1:
             raise SummaryError("LLM timeout and retry settings are invalid")
         self.model = model
         self.api_key = api_key
@@ -341,15 +218,10 @@ class OpenAISummaryProvider:
         self._sleep = sleep
         self.last_usage: dict[str, int] = {}
 
-    async def summarize(self, study: Study) -> dict[str, Any]:
-        source_fields = _source_fields_by_id(study)
-        if not source_fields:
-            raise SummaryError(f"{study.nct_id} has no official fields suitable for summarization")
-        source_ids = sorted(source_fields)
-        supplied_source_fields = [
-            {"source_id": source_id, "source_path": source_fields[source_id][0], "content": source_fields[source_id][1]}
-            for source_id in source_ids
-        ]
+    async def summarize(self, study: Study) -> str:
+        official_information = _official_study_information(study)
+        if not official_information:
+            raise SummaryError(f"{study.nct_id} has no official information suitable for explanation")
         body = {
             "model": self.model,
             "temperature": 0,
@@ -357,27 +229,21 @@ class OpenAISummaryProvider:
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "trialmatch_grounded_study_summary",
+                    "name": "trialmatch_study_explanation",
                     "strict": True,
-                    "schema": _structured_schema(source_ids),
+                    "schema": _explanation_schema(),
                 },
             },
             "messages": [
                 {
                     "role": "system",
                     "content": (
-                        "Explain the supplied ClinicalTrials.gov record in concise, everyday language. "
-                        "Use no knowledge beyond supplied_source_fields. Every factual statement must cite "
-                        "one to three supporting source_id values exactly as supplied. Never generate source "
-                        "paths or quotation text; the backend resolves cited identifiers to original fields. "
-                        "Use an empty statements list when a section is unspecified. Do not infer eligibility, "
-                        "treatment effects, procedures, duration, payment, risks, or medical advice. Do not copy long "
-                        "technical descriptions; accurately paraphrase them. Cite investigating only from "
-                        "identification, description, conditions, interventions, or outcomes modules; cite "
-                        "participation only from description, design, interventions, or outcomes modules; "
-                        "cite intended_for only from eligibility or conditions modules; cite important only "
-                        "from status, design, description, interventions, or outcomes modules. Hard limits: "
-                        "each statement must be at most 180 characters. Return the identifiers unchanged."
+                        "Explain this ClinicalTrials.gov study for a general audience using only the supplied "
+                        "official study information. Return the NCT ID and source hash unchanged plus four concise "
+                        "sections: what the study investigates, what participation may involve, who it is intended "
+                        "for, and important things to know. Do not decide whether a reader is eligible, give medical "
+                        "advice, promise benefit, or add facts absent from the record. If information for a section "
+                        "is missing, say that clearly."
                     ),
                 },
                 {
@@ -386,7 +252,7 @@ class OpenAISummaryProvider:
                         {
                             "nct_id": study.nct_id,
                             "source_hash": study.source_hash,
-                            "supplied_source_fields": supplied_source_fields,
+                            "official_study_information": official_information,
                         },
                         sort_keys=True,
                     ),
@@ -412,51 +278,42 @@ class OpenAISummaryProvider:
                     if response.status_code < 400:
                         break
                     if response.status_code not in _RETRYABLE_STATUSES or attempt >= self.max_retries:
-                        raise SummaryError(
-                            f"OpenAI summary request failed with status {response.status_code}"
-                        )
+                        raise SummaryError(f"OpenAI explanation request failed with status {response.status_code}")
                 except httpx.HTTPError as exc:
                     if attempt >= self.max_retries:
                         raise SummaryError(
-                            f"OpenAI summary request failed after {attempt + 1} attempt(s): "
-                            f"{type(exc).__name__}"
+                            f"OpenAI explanation request failed after {attempt + 1} attempt(s): {type(exc).__name__}"
                         ) from exc
                 await self._sleep(min(2**attempt, self.max_retry_delay_seconds))
             if response is None or response.status_code >= 400:
-                raise SummaryError("OpenAI summary request failed")
+                raise SummaryError("OpenAI explanation request failed")
             envelope = response.json()
             usage = envelope.get("usage", {})
             if isinstance(usage, dict):
                 self.last_usage = {
-                    key: value for key, value in usage.items() if isinstance(key, str) and isinstance(value, int)
+                    key: value for key, value in usage.items()
+                    if isinstance(key, str) and isinstance(value, int)
                 }
             choice = envelope["choices"][0]
             if choice.get("finish_reason") not in {None, "stop"}:
-                raise SummaryError("OpenAI summary response was incomplete")
+                raise SummaryError("OpenAI explanation response was incomplete")
             message = choice["message"]
             if message.get("refusal"):
-                raise SummaryError("OpenAI refused the summary request")
+                raise SummaryError("OpenAI refused the explanation request")
             content = message["content"]
             if not isinstance(content, str):
-                raise TypeError("provider content must be a JSON string")
-            payload = json.loads(content)
-            if not isinstance(payload, dict):
-                raise TypeError("provider JSON must be an object")
-            return payload
+                raise TypeError("provider content must be text")
+            return _parse_generated_content(study, content)
         except SummaryError:
             raise
         except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as exc:
-            raise SummaryError(
-                f"OpenAI summary response failed validation: {type(exc).__name__}"
-            ) from exc
+            raise SummaryError(f"OpenAI explanation response was unusable: {type(exc).__name__}") from exc
         finally:
             if owns_client:
                 await client.aclose()
 
 
 def summary_provider_from_environment() -> SummaryProvider:
-    """Build a backend-only provider; disabled mode is the secure default."""
-
     provider = os.getenv("LLM_PROVIDER", "disabled").strip().casefold()
     if provider in {"", "disabled", "offline"}:
         return DisabledSummaryProvider()
@@ -470,8 +327,7 @@ def summary_provider_from_environment() -> SummaryProvider:
         return OpenAISummaryProvider(
             model=os.getenv("LLM_MODEL", DEFAULT_OPENAI_MODEL).strip() or DEFAULT_OPENAI_MODEL,
             api_key=os.getenv("LLM_API_KEY", ""),
-            base_url=os.getenv("LLM_BASE_URL", DEFAULT_OPENAI_BASE_URL).strip()
-            or DEFAULT_OPENAI_BASE_URL,
+            base_url=os.getenv("LLM_BASE_URL", DEFAULT_OPENAI_BASE_URL).strip() or DEFAULT_OPENAI_BASE_URL,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             max_http_requests=max_http_requests,
@@ -479,186 +335,7 @@ def summary_provider_from_environment() -> SummaryProvider:
     raise SummaryError(f"unsupported LLM_PROVIDER: {provider}")
 
 
-def _word_stem(word: str) -> str:
-    for suffix in ("ingly", "edly", "ation", "ment", "ing", "ed", "es", "s"):
-        if word.endswith(suffix) and len(word) > len(suffix) + 3:
-            return word[: -len(suffix)]
-    return word
-
-
-def _material_stems(value: str) -> set[str]:
-    return {
-        _word_stem(word)
-        for word in re.findall(r"[a-z][a-z0-9]*(?:\.[a-z0-9]+)*", value.casefold())
-        if word not in _EVIDENCE_OVERLAP_STOPWORDS
-    }
-
-
-def _has_sufficient_evidence_overlap(statement: str, evidence: str) -> bool:
-    """Reject unrelated citations without requiring every paraphrase word verbatim."""
-
-    statement_concepts = _material_stems(statement)
-    if not statement_concepts:
-        return True
-    evidence_concepts = _material_stems(evidence)
-    overlap = statement_concepts.intersection(evidence_concepts)
-    required = min(2, len(statement_concepts))
-    return len(overlap) >= required
-
-
-def _exact_source_excerpt(source_value: str, statement: str, max_length: int = 500) -> str:
-    """Select an exact source substring most relevant to a generated statement."""
-
-    if len(source_value) <= max_length:
-        return source_value
-    source_lower = source_value.casefold()
-    anchors = sorted(_material_stems(statement), key=len, reverse=True)
-    positions = [source_lower.find(anchor) for anchor in anchors if source_lower.find(anchor) >= 0]
-    candidates: list[str] = []
-    for position in positions or [0]:
-        start = max(0, min(position - max_length // 2, len(source_value) - max_length))
-        if start > 0:
-            next_space = source_value.find(" ", start)
-            if next_space >= 0:
-                start = next_space + 1
-        end = min(len(source_value), start + max_length)
-        if end < len(source_value):
-            previous_space = source_value.rfind(" ", start, end)
-            if previous_space > start:
-                end = previous_space
-        candidates.append(source_value[start:end].strip())
-    statement_numbers = set(re.findall(r"\d+(?:\.\d+)?", statement))
-    statement_concepts = _material_stems(statement)
-    return max(
-        candidates,
-        key=lambda candidate: (
-            len(statement_numbers.intersection(re.findall(r"\d+(?:\.\d+)?", candidate))),
-            len(statement_concepts.intersection(_material_stems(candidate))),
-        ),
-    )
-
-
-def _resolve_source_references(study: Study, raw: dict[str, Any]) -> dict[str, Any]:
-    """Resolve provider field IDs to backend-authored exact source evidence."""
-
-    try:
-        referenced = ReferencedSummary.model_validate(raw, strict=True)
-    except ValidationError as exc:
-        raise SummaryError(
-            f"summary reference output failed schema validation: {exc.error_count()} error(s)"
-        ) from exc
-    if referenced.nct_id != study.nct_id or referenced.source_hash != study.source_hash:
-        raise SummaryError("summary output identifiers do not match the current source record")
-
-    source_fields = _source_fields_by_id(study)
-    resolved: dict[str, Any] = {
-        "nct_id": referenced.nct_id,
-        "source_hash": referenced.source_hash,
-    }
-    for section_name, _ in _SECTION_ORDER:
-        resolved_statements: list[dict[str, Any]] = []
-        allowed_markers = _SECTION_PATH_MARKERS[section_name]
-        for statement in getattr(referenced, section_name).statements:
-            evidence_items: list[dict[str, str]] = []
-            for reference in statement.evidence:
-                source_field = source_fields.get(reference.source_id)
-                if source_field is None:
-                    raise SummaryError("summary output cited an unknown source field identifier")
-                source_path, source_value = source_field
-                if not any(marker in source_path for marker in allowed_markers):
-                    raise SummaryError("summary output cites evidence from the wrong section")
-                evidence_items.append(
-                    {
-                        "source_path": source_path,
-                        "quote": _exact_source_excerpt(source_value, statement.text),
-                    }
-                )
-            resolved_statements.append(
-                {"text": statement.text, "evidence": evidence_items}
-            )
-        resolved[section_name] = {"statements": resolved_statements}
-    return resolved
-
-
-def _validate_structured_summary(study: Study, raw: dict[str, Any]) -> StructuredSummary:
-    try:
-        result = StructuredSummary.model_validate(raw, strict=True)
-    except ValidationError as exc:
-        raise SummaryError(
-            f"summary output failed schema validation: {exc.error_count()} error(s)"
-        ) from exc
-    if result.nct_id != study.nct_id or result.source_hash != study.source_hash:
-        raise SummaryError("summary output identifiers do not match the current source record")
-
-    source_fields = _official_source_fields(study)
-    for section_name, _ in _SECTION_ORDER:
-        section = getattr(result, section_name)
-        allowed_markers = _SECTION_PATH_MARKERS[section_name]
-        content_markers = _SECTION_CONTENT_MARKERS[section_name]
-        relevant_fields = [
-            path for path in source_fields if any(marker in path for marker in content_markers)
-        ]
-        if not section.statements and relevant_fields:
-            raise SummaryError(
-                f"summary output omitted available official information for {section_name}"
-            )
-        for statement in section.statements:
-            normalized_statement = _normalized_text(statement.text)
-            if any(
-                re.search(pattern, normalized_statement, re.IGNORECASE)
-                for pattern in _UNSUPPORTED_PATTERNS
-            ):
-                raise SummaryError(
-                    "summary output contains an unsupported eligibility or medical claim"
-                )
-            evidence_text: list[str] = []
-            for evidence in statement.evidence:
-                if not any(marker in evidence.source_path for marker in allowed_markers):
-                    raise SummaryError("summary output cites evidence from the wrong section")
-                official_value = source_fields.get(evidence.source_path)
-                normalized_quote = _normalized_text(evidence.quote)
-                if (
-                    official_value is None
-                    or normalized_quote.casefold() not in official_value.casefold()
-                ):
-                    raise SummaryError(
-                        "summary output contains evidence absent from the official source"
-                    )
-                evidence_text.append(normalized_quote)
-            joined_evidence = " ".join(evidence_text)
-            supported_numbers = set(re.findall(r"\d+(?:\.\d+)?", joined_evidence))
-            statement_numbers = set(re.findall(r"\d+(?:\.\d+)?", normalized_statement))
-            if not statement_numbers.issubset(supported_numbers):
-                raise SummaryError(
-                    "summary output contains a number absent from its cited evidence"
-                )
-            if not _has_sufficient_evidence_overlap(
-                normalized_statement, joined_evidence
-            ):
-                raise SummaryError(
-                    "summary statement is not sufficiently supported by its cited evidence"
-                )
-            copied = any(
-                normalized_statement.casefold() == item.casefold() and len(item) > 100
-                for item in evidence_text
-            )
-            if copied:
-                raise SummaryError("summary output copied a long technical source passage")
-    return result
-
-
-def _render_summary(result: StructuredSummary) -> str:
-    parts: list[str] = []
-    for name, heading in _SECTION_ORDER:
-        statements = getattr(result, name).statements
-        text = " ".join(_normalized_text(statement.text) for statement in statements)
-        parts.append(f"{heading} {text or _MISSING_SECTION_TEXT[name]}")
-    return "\n\n".join(parts)
-
-
 class _GenerationBudget:
-    """One process-level accepted-generation allowance shared by summary paths."""
-
     def __init__(self, remaining: int):
         self.remaining = remaining
         self.lock = asyncio.Lock()
@@ -671,7 +348,7 @@ class _GenerationBudget:
 
 
 class StudySummaryService:
-    """Validate, cache, coalesce, and bound paid generation for known studies."""
+    """Cache, coalesce, and bound direct explanation generation for one study record."""
 
     def __init__(
         self,
@@ -687,23 +364,29 @@ class StudySummaryService:
         self.repository = repository
         self.provider = provider
         self._semaphore = asyncio.Semaphore(max_concurrency)
-        self._generation_budget = generation_budget or _GenerationBudget(
-            max_generation_requests
-        )
+        self._generation_budget = generation_budget or _GenerationBudget(max_generation_requests)
         self._in_flight: dict[str, asyncio.Task[tuple[PlainLanguageSummaryPayload, bool]]] = {}
 
     def cache_key(self, study: Study) -> str:
         material = ":".join(
-            (
-                study.nct_id,
-                study.source_hash,
-                SCHEMA_VERSION,
-                PROMPT_VERSION,
-                self.provider.name,
-                self.provider.model,
-            )
+            (study.nct_id, study.source_hash, SCHEMA_VERSION, PROMPT_VERSION, self.provider.name, self.provider.model)
         )
         return hashlib.sha256(material.encode()).hexdigest()
+
+    def cached(self, study: Study) -> PlainLanguageSummaryPayload | None:
+        try:
+            raw = self.repository.get_cached_summary(self.cache_key(study))
+        except Exception:
+            return None
+        if not isinstance(raw, dict):
+            return None
+        try:
+            payload = PlainLanguageSummaryPayload.model_validate(raw, strict=True)
+        except ValidationError:
+            return None
+        if payload.nct_id != study.nct_id or payload.source_hash != study.source_hash:
+            return None
+        return payload
 
     async def summarize(self, study: Study) -> tuple[PlainLanguageSummaryPayload, bool]:
         key = self.cache_key(study)
@@ -711,103 +394,46 @@ class StudySummaryService:
         if task is None:
             task = asyncio.create_task(self._summarize_once(study, key))
             self._in_flight[key] = task
-            task.add_done_callback(
-                lambda completed, request_key=key: self._discard_completed(
-                    request_key, completed
-                )
-            )
+            task.add_done_callback(lambda completed, request_key=key: self._discard(request_key, completed))
         return await asyncio.shield(task)
 
-    def _discard_completed(
-        self,
-        key: str,
-        task: asyncio.Task[tuple[PlainLanguageSummaryPayload, bool]],
-    ) -> None:
+    def _discard(self, key: str, task: asyncio.Task[tuple[PlainLanguageSummaryPayload, bool]]) -> None:
         if self._in_flight.get(key) is task:
             self._in_flight.pop(key, None)
 
-    async def _summarize_once(
-        self, study: Study, key: str
-    ) -> tuple[PlainLanguageSummaryPayload, bool]:
-        cached = self.repository.get_cached_summary(key)
+    async def _summarize_once(self, study: Study, key: str) -> tuple[PlainLanguageSummaryPayload, bool]:
+        cached = self.cached(study)
         if cached is not None:
-            try:
-                return self._validate_cached(study, cached), True
-            except SummaryError:
-                pass
+            return cached, True
         await self._generation_budget.claim()
         async with self._semaphore:
-            raw = await self.provider.summarize(study)
-        structured = _validate_structured_summary(
-            study, _resolve_source_references(study, raw)
-        )
+            explanation = await self.provider.summarize(study)
+        if not isinstance(explanation, str) or not explanation.strip():
+            raise SummaryError("OpenAI returned an empty explanation")
         payload = PlainLanguageSummaryPayload(
             nct_id=study.nct_id,
             source_hash=study.source_hash,
-            plain_language_summary=_render_summary(structured),
+            plain_language_summary=explanation.strip(),
         )
-        cached_payload = {
-            **payload.model_dump(mode="json"),
-            "grounded_sections": structured.model_dump(mode="json"),
-        }
-        self.repository.publish_summary(
-            cache_key=key,
-            nct_id=study.nct_id,
-            source_hash=study.source_hash,
-            provider=self.provider.name,
-            model=self.provider.model,
-            schema_version=SCHEMA_VERSION,
-            prompt_version=PROMPT_VERSION,
-            payload=cached_payload,
-            created_at=datetime.now(UTC),
-        )
-        return payload, False
-
-    @staticmethod
-    def _validate_cached(study: Study, raw: dict[str, Any]) -> PlainLanguageSummaryPayload:
-        sections = raw.get("grounded_sections")
-        if not isinstance(sections, dict):
-            raise SummaryError("cached summary lacks grounding evidence")
-        structured = _validate_structured_summary(study, sections)
-        expected_text = PlainLanguageSummaryPayload(
-            nct_id=study.nct_id,
-            source_hash=study.source_hash,
-            plain_language_summary=_render_summary(structured),
-        ).plain_language_summary
         try:
-            payload = PlainLanguageSummaryPayload.model_validate(
-                {
-                    "nct_id": raw.get("nct_id"),
-                    "source_hash": raw.get("source_hash"),
-                    "plain_language_summary": raw.get("plain_language_summary"),
-                },
-                strict=True,
+            self.repository.publish_summary(
+                cache_key=key,
+                nct_id=study.nct_id,
+                source_hash=study.source_hash,
+                provider=self.provider.name,
+                model=self.provider.model,
+                schema_version=SCHEMA_VERSION,
+                prompt_version=PROMPT_VERSION,
+                payload=payload.model_dump(mode="json"),
+                created_at=datetime.now(UTC),
             )
-        except ValidationError as exc:
-            raise SummaryError("cached summary failed schema validation") from exc
-        if payload.nct_id != study.nct_id or payload.source_hash != study.source_hash:
-            raise SummaryError("cached summary identifiers do not match the current source record")
-        if payload.plain_language_summary != expected_text:
-            raise SummaryError("cached summary text does not match its grounded sections")
-        return payload
-
-    @staticmethod
-    def _validate(study: Study, raw: dict[str, Any]) -> PlainLanguageSummaryPayload:
-        """Compatibility validation entry point used by callers and focused tests."""
-
-        structured = _validate_structured_summary(
-            study, _resolve_source_references(study, raw)
-        )
-        return PlainLanguageSummaryPayload(
-            nct_id=study.nct_id,
-            source_hash=study.source_hash,
-            plain_language_summary=_render_summary(structured),
-        )
+        except Exception:
+            # Cache availability is secondary; a usable generated explanation must be returned.
+            pass
+        return payload, False
 
 
 class _MemorySummaryRepository:
-    """Process-local cache for records that must not enter the ingestion catalog."""
-
     def __init__(self) -> None:
         self.studies: dict[str, Study] = {}
         self.summaries: dict[str, dict[str, Any]] = {}
@@ -824,18 +450,13 @@ class _MemorySummaryRepository:
         return self.summaries.get(cache_key)
 
     def publish_summary(self, **kwargs: Any) -> None:
-        study = self.studies.get(str(kwargs["nct_id"]))
-        if study is None or study.source_hash != kwargs["source_hash"]:
-            raise SummaryError("cannot cache a summary for a stale official source")
         self.summaries[str(kwargs["cache_key"])] = dict(kwargs["payload"])
 
 
 async def load_official_study_for_summary(nct_id: str) -> Study:
-    """Revalidate one official record using a cache isolated from bulk ingestion."""
+    """Fetch the selected official ClinicalTrials.gov API v2 record directly."""
 
-    cache_dir = os.getenv(
-        "SUMMARY_SOURCE_CACHE_DIR", "backend/data/cache/summary-source"
-    )
+    cache_dir = os.getenv("SUMMARY_SOURCE_CACHE_DIR", "backend/data/cache/summary-source")
     async with ClinicalTrialsClient(cache_dir=cache_dir) as client:
         detail = await client.fetch_detail(nct_id, use_cache=False)
     return normalize_study(
@@ -846,12 +467,7 @@ async def load_official_study_for_summary(nct_id: str) -> Study:
 
 
 class OnDemandStudySummaryService:
-    """Generate for any valid NCT ID without mutating the ingestion-owned catalog.
-
-    Every request revalidates the official record. If its hash matches a catalog row,
-    the durable repository cache is used. Unknown or newly changed records use an
-    isolated process-local cache until post-ingestion Supabase integration is safe.
-    """
+    """Fetch one selected official study, generate once, and cache when possible."""
 
     def __init__(
         self,
@@ -865,13 +481,13 @@ class OnDemandStudySummaryService:
         self.repository = repository
         self.provider = provider
         self.official_study_loader = official_study_loader or load_official_study_for_summary
-        shared_budget = _GenerationBudget(max_generation_requests)
+        budget = _GenerationBudget(max_generation_requests)
         self.summary_service = StudySummaryService(
             repository,
             provider,
             max_concurrency=max_concurrency,
             max_generation_requests=max_generation_requests,
-            generation_budget=shared_budget,
+            generation_budget=budget,
         )
         self.external_repository = _MemorySummaryRepository()
         self.external_summary_service = StudySummaryService(
@@ -879,74 +495,57 @@ class OnDemandStudySummaryService:
             provider,
             max_concurrency=max_concurrency,
             max_generation_requests=max_generation_requests,
-            generation_budget=shared_budget,
+            generation_budget=budget,
         )
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self._in_flight: dict[str, asyncio.Task[tuple[PlainLanguageSummaryPayload, bool]]] = {}
 
-    async def summarize_nct_id(
-        self, nct_id: str
-    ) -> tuple[PlainLanguageSummaryPayload, bool]:
+    async def summarize_nct_id(self, nct_id: str) -> tuple[PlainLanguageSummaryPayload, bool]:
         if re.fullmatch(r"NCT\d{8}", nct_id) is None:
             raise SummaryError("invalid NCT identifier")
+
+        current = self.repository.get_study(nct_id)
+        if current is not None:
+            cached = self.summary_service.cached(current)
+            if cached is not None:
+                return cached, True
         if isinstance(self.provider, DisabledSummaryProvider):
-            raise SummaryError(
-                f"LLM provider is disabled; on-demand generation is unavailable for {nct_id}"
-            )
+            raise SummaryError(f"LLM provider is disabled; on-demand generation is unavailable for {nct_id}")
+
         task = self._in_flight.get(nct_id)
         if task is None:
             task = asyncio.create_task(self._bounded_load_and_summarize(nct_id))
             self._in_flight[nct_id] = task
-            task.add_done_callback(
-                lambda completed, request_id=nct_id: self._discard_completed(
-                    request_id, completed
-                )
-            )
+            task.add_done_callback(lambda completed, request_id=nct_id: self._discard(request_id, completed))
         return await asyncio.shield(task)
 
-    def _discard_completed(
-        self,
-        nct_id: str,
-        task: asyncio.Task[tuple[PlainLanguageSummaryPayload, bool]],
-    ) -> None:
+    def _discard(self, nct_id: str, task: asyncio.Task[tuple[PlainLanguageSummaryPayload, bool]]) -> None:
         if self._in_flight.get(nct_id) is task:
             self._in_flight.pop(nct_id, None)
 
-    async def _bounded_load_and_summarize(
-        self, nct_id: str
-    ) -> tuple[PlainLanguageSummaryPayload, bool]:
+    async def _bounded_load_and_summarize(self, nct_id: str) -> tuple[PlainLanguageSummaryPayload, bool]:
         async with self._semaphore:
-            return await self._load_and_summarize(nct_id)
+            try:
+                study = await self.official_study_loader(nct_id)
+            except SummaryError:
+                raise
+            except Exception as exc:
+                raise SummaryError(f"official study retrieval failed: {type(exc).__name__}") from exc
+            if study.nct_id != nct_id:
+                raise SummaryError("official source returned a different NCT identifier")
 
-    async def _load_and_summarize(
-        self, nct_id: str
-    ) -> tuple[PlainLanguageSummaryPayload, bool]:
-        current = self.repository.get_study(nct_id)
-        if (
-            current is not None
-            and current.detail_status == DetailRetrievalStatus.RETRIEVED
-        ):
-            # A retrieved row retains the complete official record and its canonical
-            # hash. Prefer it so opening a study never performs a redundant registry call.
-            return await self.summary_service.summarize(current)
+            current = self.repository.get_study(nct_id)
+            if current is not None and current.source_hash == study.source_hash:
+                return await self.summary_service.summarize(study)
+            self.external_repository.upsert_studies([study])
+            return await self.external_summary_service.summarize(study)
 
-        try:
-            study = await self.official_study_loader(nct_id)
-        except SummaryError:
-            raise
-        except Exception as exc:
-            raise SummaryError(
-                f"official study retrieval failed: {type(exc).__name__}"
-            ) from exc
-        if study.nct_id != nct_id:
-            raise SummaryError("official source returned a different NCT identifier")
 
-        refreshed_current = self.repository.get_study(nct_id)
-        if (
-            refreshed_current is not None
-            and refreshed_current.source_hash == study.source_hash
-        ):
-            return await self.summary_service.summarize(study)
+async def generate_trial_explanation(
+    nct_id: str,
+    repository: SummaryRepository,
+    provider: SummaryProvider,
+) -> tuple[PlainLanguageSummaryPayload, bool]:
+    """Simple public service function used by direct integrations and tests."""
 
-        self.external_repository.upsert_studies([study])
-        return await self.external_summary_service.summarize(study)
+    return await OnDemandStudySummaryService(repository, provider).summarize_nct_id(nct_id)

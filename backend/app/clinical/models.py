@@ -274,7 +274,7 @@ class Study(StrictModel):
 class PlainLanguageSummaryPayload(StrictModel):
     nct_id: str = Field(pattern=r"^NCT\d{8}$")
     source_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
-    plain_language_summary: str = Field(min_length=1, max_length=1200)
+    plain_language_summary: str = Field(min_length=1, max_length=8000)
 
     @field_validator("plain_language_summary")
     @classmethod

@@ -88,6 +88,8 @@ describe("participant study discovery and details", () => {
     expect(html).toContain("Who is the study intended for?");
     expect(html).toContain("Important things to know");
     expect(html).toContain("Read the original ClinicalTrials.gov description");
+    expect(html).toContain("AI-generated explanation based on ClinicalTrials.gov study information");
+    expect(html).toContain("Verify details with the research team");
     expect(html).toContain("not medical advice or a verified eligibility decision");
     expect(html).toContain("Official brief summary");
     expect(html).toContain("Official detailed description");

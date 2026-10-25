@@ -353,7 +353,7 @@ export function StudyDetailPanel({summary, detail, loading, error, summaryText, 
     <section className="mt-7 rounded-2xl border border-emerald-200 bg-white p-5" aria-labelledby="ai-summary-heading">
       <p className="text-xs font-bold uppercase tracking-[0.16em] text-accent">Participant overview</p>
       <h3 className="mt-2 text-lg font-black text-emerald-950" id="ai-summary-heading">AI-generated plain-language explanation</h3>
-      <p className="mt-2 text-xs leading-5 text-slate-500">Generated from this study’s official ClinicalTrials.gov record. This is not medical advice or a verified eligibility decision.</p>
+      <p className="mt-2 text-xs leading-5 text-slate-500">AI-generated explanation based on ClinicalTrials.gov study information. Verify details with the research team. This is not medical advice or a verified eligibility decision.</p>
       <div aria-live="polite" className="mt-4">
         {summaryLoading ? <div className="rounded-xl bg-emerald-50 p-4 text-sm font-semibold text-emerald-950" role="status">Generating and validating the AI explanation… Official study information remains available below.</div> : null}
         {summaryError ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950" role="alert"><p>{summaryError}</p><p className="mt-1">Use the original official description below while this feature is unavailable.</p><button className="mt-3 w-full rounded-lg bg-white px-3 py-2 font-bold ring-1 ring-amber-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent sm:w-auto" onClick={onRetrySummary} type="button">Try AI summary again</button></div> : null}
