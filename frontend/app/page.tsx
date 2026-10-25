@@ -8,7 +8,6 @@ export default function Home() {
       <SiteHeader active="home" />
       <main className="mx-auto flex min-h-[calc(100vh-68px)] max-w-5xl flex-col justify-center px-6 py-16">
       <p className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-accent">
-        Hackachusetts 2026 · H5
       </p>
       <h1 className="text-5xl font-bold tracking-tight text-ink">TrialMatch</h1>
       <p className="mt-6 max-w-2xl text-lg leading-8 text-slate-700">
