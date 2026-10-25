@@ -1,4 +1,4 @@
-import type {GeoFeature, GeoSummary} from "./types";
+import type {GeoSummary} from "./types";
 
 export const KILOMETERS_PER_MILE = 1.609344;
 export const MAX_RADIUS_KM = 200;
@@ -79,26 +79,4 @@ export function scoreDifference(optimized: number, baseline: number) {
     percentage: baseline === 0 ? null : (difference / baseline) * 100,
     tied: difference === 0,
   };
-}
-
-/** Keeps number controls readable without changing the full-precision API value. */
-export function formatRadiusInput(value: number) {
-  return Number(value.toFixed(1));
-}
-
-/**
- * Returns transparent access-gap candidates: zero nearby studies, with the
- * farthest known nearest recruiting location first. Null distances sort last.
- */
-export function accessGapFeatures(features: GeoFeature[]) {
-  return features
-    .filter((feature) => feature.properties.distinct_nearby_recruiting_nct_count === 0)
-    .sort((left, right) => {
-      const leftDistance = left.properties.nearest_resolved_recruiting_site_distance_km;
-      const rightDistance = right.properties.nearest_resolved_recruiting_site_distance_km;
-      if (leftDistance === null && rightDistance === null) return left.id.localeCompare(right.id);
-      if (leftDistance === null) return 1;
-      if (rightDistance === null) return -1;
-      return rightDistance - leftDistance || left.id.localeCompare(right.id);
-    });
 }

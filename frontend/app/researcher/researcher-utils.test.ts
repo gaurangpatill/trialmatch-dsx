@@ -6,12 +6,10 @@ import {
   KILOMETERS_PER_MILE,
   MAX_RADIUS_KM,
   MAX_RADIUS_MILES,
-  accessGapFeatures,
   accessQuery,
   clinicalFilterCounts,
   displayedPlanIsOutdated,
   formatMiles,
-  formatRadiusInput,
   isPlanStale,
   isUsablePlanStatus,
   kilometersToMiles,
@@ -101,33 +99,5 @@ describe("condition-filter counts", () => {
       resolved: null,
       unresolved: null,
     });
-  });
-});
-
-describe("researcher presentation helpers", () => {
-  it("shows radius inputs at one decimal without changing API conversion precision", () => {
-    expect(formatRadiusInput(DEFAULT_RADIUS_MILES)).toBe(15.5);
-    expect(milesToKilometers(DEFAULT_RADIUS_MILES)).toBeCloseTo(25, 12);
-  });
-
-  it("selects only zero-trial communities and sorts known nearest distances first", () => {
-    const feature = (id: string, nearby: number | null, distance: number | null) => ({
-      type: "Feature" as const,
-      id,
-      geometry: null,
-      properties: {
-        distinct_nearby_recruiting_nct_count: nearby,
-        nearest_resolved_recruiting_site_distance_km: distance,
-      },
-    });
-    const gaps = accessGapFeatures([
-      feature("Nearby", 1, 2),
-      feature("Unknown", null, null),
-      feature("Gap without site", 0, null),
-      feature("Closer gap", 0, 18),
-      feature("Farther gap", 0, 42),
-    ] as never);
-
-    expect(gaps.map((item) => item.id)).toEqual(["Farther gap", "Closer gap", "Gap without site"]);
   });
 });
