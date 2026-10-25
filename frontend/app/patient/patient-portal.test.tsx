@@ -2,7 +2,7 @@ import {renderToStaticMarkup} from "react-dom/server";
 import {describe, expect, it} from "vitest";
 
 import type {TrialDetail, TrialSummary} from "@/lib/clinical-contracts";
-import {PatientPortal, StudyDetailPanel, TrialCard} from "./patient-portal";
+import {PatientPortal, StudyDetailPanel, TrialCard, parseSummarySections} from "./patient-portal";
 
 const summary: TrialSummary = {
   nct_id: "NCT01521741",
@@ -13,7 +13,7 @@ const summary: TrialSummary = {
   source_description: "The official study measures arm changes and symptoms during and after breast cancer treatment.",
   brief_summary: "The official study measures arm changes and symptoms during and after breast cancer treatment.",
   detailed_description: "Participants complete questionnaires and objective arm measurements during follow-up.",
-  plain_language_summary: "Researchers are studying arm symptoms and swelling during and after breast cancer treatment.",
+  plain_language_summary: "What is this study investigating? Researchers are studying arm symptoms and swelling during and after breast cancer treatment. What might participation involve? Participants complete questionnaires and arm measurements. Who is the study intended for? The study is intended for adults with breast cancer. Important things to know. ClinicalTrials.gov lists the study as recruiting.",
   minimum_age: "18 Years",
   maximum_age: null,
   sex: "FEMALE",
@@ -79,10 +79,16 @@ describe("participant study discovery and details", () => {
 
   it("renders source-faithful study details without screening support", () => {
     const html = renderToStaticMarkup(
-      <StudyDetailPanel summary={summary} detail={detail} loading={false} error={null} onClose={() => undefined} onRefresh={() => undefined} />,
+      <StudyDetailPanel summary={summary} detail={detail} loading={false} error={null} summaryText={summary.plain_language_summary ?? null} summaryLoading={false} summaryError={null} onClose={() => undefined} onRefresh={() => undefined} onRetrySummary={() => undefined} />,
     );
 
-    expect(html).toContain("Read the original technical description");
+    expect(html).toContain("AI-generated plain-language explanation");
+    expect(html).toContain("What is this study investigating?");
+    expect(html).toContain("What might participation involve?");
+    expect(html).toContain("Who is the study intended for?");
+    expect(html).toContain("Important things to know");
+    expect(html).toContain("Read the original ClinicalTrials.gov description");
+    expect(html).toContain("not medical advice or a verified eligibility decision");
     expect(html).toContain("Official brief summary");
     expect(html).toContain("Official detailed description");
     expect(html).toContain("Participants complete questionnaires");
@@ -99,6 +105,23 @@ describe("participant study discovery and details", () => {
     expect(html).toContain('href="https://clinicaltrials.gov/study/NCT01521741"');
     expect(html).toContain('target="_blank"');
     expect(html).not.toContain("Preliminary screening support");
+  });
+
+  it("renders explicit AI loading and error fallbacks without hiding official text", () => {
+    const loadingHtml = renderToStaticMarkup(
+      <StudyDetailPanel summary={summary} detail={detail} loading={false} error={null} summaryText={null} summaryLoading={true} summaryError={null} onClose={() => undefined} onRefresh={() => undefined} onRetrySummary={() => undefined} />,
+    );
+    expect(loadingHtml).toContain("Generating and validating the AI explanation");
+    expect(loadingHtml).toContain("Official brief summary");
+
+    const errorHtml = renderToStaticMarkup(
+      <StudyDetailPanel summary={summary} detail={detail} loading={false} error={null} summaryText={summary.plain_language_summary ?? null} summaryLoading={false} summaryError="The AI summary is temporarily unavailable." onClose={() => undefined} onRefresh={() => undefined} onRetrySummary={() => undefined} />,
+    );
+    expect(errorHtml).toContain("Try AI summary again");
+    expect(errorHtml).toContain("What is this study investigating?");
+    expect(errorHtml).toContain("Use the original official description");
+    expect(errorHtml).toContain("Official detailed description");
+    expect(parseSummarySections("unexpected legacy text")).toBeNull();
   });
 
   it("omits the fictional example comparison sidebar while keeping discovery", () => {

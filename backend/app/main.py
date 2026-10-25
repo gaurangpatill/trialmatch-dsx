@@ -15,6 +15,7 @@ from backend.app.clinical.dependencies import (
     get_repository,
 )
 from backend.app.clinical.models import ErrorBody, ErrorDetail, ErrorResponse
+from backend.app.clinical.summaries import SummaryError
 from backend.app.clinical.router import router as clinical_router
 from backend.app.geography.router import (
     GeographyAPIError,
@@ -111,6 +112,24 @@ async def clinical_repository_error_handler(
                 if not_ready
                 else "Clinical storage is unavailable."
             ),
+            details=[],
+            retryable=True,
+            request_id=request.headers.get("x-request-id") or uuid.uuid4().hex,
+        )
+    )
+    return JSONResponse(status_code=503, content=payload.model_dump(mode="json"))
+
+
+@app.exception_handler(SummaryError)
+async def summary_configuration_error_handler(
+    request: Request, _exc: SummaryError
+) -> JSONResponse:
+    """Sanitize provider configuration failures raised while resolving dependencies."""
+
+    payload = ErrorResponse(
+        error=ErrorBody(
+            code="AI_SUMMARY_UNAVAILABLE",
+            message="The AI summary is temporarily unavailable. The official study description remains available.",
             details=[],
             retryable=True,
             request_id=request.headers.get("x-request-id") or uuid.uuid4().hex,

@@ -12,8 +12,9 @@ from backend.app.clinical.database import ClinicalRepository
 from backend.app.clinical.dependencies import (
     ClinicalRepositoryUnavailable,
     get_repository,
+    get_summary_service,
 )
-from backend.app.clinical.models import DetailRetrievalStatus
+from backend.app.clinical.models import DetailRetrievalStatus, PlainLanguageSummaryPayload
 from backend.app.clinical.normalize import normalize_study, source_structured_criteria
 from backend.app.main import app
 
@@ -288,3 +289,66 @@ def test_unavailable_clinical_storage_returns_sanitized_error():
     assert body["request_id"]
     assert "sensitive" not in response.text
     assert "db.invalid" not in response.text
+
+
+def test_on_demand_summary_endpoint_returns_cache_provenance(study_factory, tmp_path):
+    repository = ClinicalRepository(tmp_path / "clinical.sqlite3")
+    study = study_factory()
+    repository.upsert_studies([study])
+    calls = 0
+
+    class FakeSummaryService:
+        async def summarize_nct_id(self, nct_id):
+            nonlocal calls
+            calls += 1
+            assert nct_id == study.nct_id
+            return (
+                PlainLanguageSummaryPayload(
+                    nct_id=nct_id,
+                    source_hash=study.source_hash,
+                    plain_language_summary=(
+                        "What is this study investigating? Official purpose. "
+                        "What might participation involve? Official procedures. "
+                        "Who is the study intended for? Published population. "
+                        "Important things to know. Review the official record."
+                    ),
+                ),
+                calls > 1,
+            )
+
+    app.dependency_overrides[get_repository] = lambda: repository
+    app.dependency_overrides[get_summary_service] = lambda: FakeSummaryService()
+    with TestClient(app) as client:
+        first = client.post(f"/api/trials/{study.nct_id}/summary")
+        second = client.post(f"/api/trials/{study.nct_id}/summary")
+        missing = client.post("/api/trials/NCT99999999/summary")
+    app.dependency_overrides.clear()
+
+    assert first.status_code == 200
+    assert first.json()["from_cache"] is False
+    assert second.status_code == 200
+    assert second.json()["from_cache"] is True
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "TRIAL_NOT_FOUND"
+
+
+def test_on_demand_summary_endpoint_sanitizes_provider_failure(study_factory, tmp_path):
+    repository = ClinicalRepository(tmp_path / "clinical.sqlite3")
+    study = study_factory()
+    repository.upsert_studies([study])
+
+    class FailingSummaryService:
+        async def summarize_nct_id(self, _nct_id):
+            from backend.app.clinical.summaries import SummaryError
+            raise SummaryError("provider secret and diagnostic")
+
+    app.dependency_overrides[get_repository] = lambda: repository
+    app.dependency_overrides[get_summary_service] = lambda: FailingSummaryService()
+    with TestClient(app) as client:
+        response = client.post(f"/api/trials/{study.nct_id}/summary")
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "AI_SUMMARY_UNAVAILABLE"
+    assert "secret" not in response.text
+    assert "official study description remains available" in response.text.lower()

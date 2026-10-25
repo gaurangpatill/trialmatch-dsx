@@ -12,9 +12,10 @@ from fastapi import APIRouter, Depends, Path, Query
 from fastapi.responses import JSONResponse
 
 from .client import ClinicalTrialsClient
-from .dependencies import require_ready_repository
+from .dependencies import get_summary_service, require_ready_repository
 from .matching import MatchingService, UnknownTrialIds, extraction_coverage
 from .repository import ClinicalRepositoryProtocol
+from .summaries import OnDemandStudySummaryService, SummaryError
 from .models import (
     DataFreshness,
     DetailRetrievalStatus,
@@ -23,6 +24,7 @@ from .models import (
     ErrorResponse,
     MatchRequest,
     MatchResponse,
+    OnDemandSummaryResponse,
     Pagination,
     Study,
     StudyDetailResponse,
@@ -36,6 +38,9 @@ from .normalize import normalize_study, source_structured_criteria
 router = APIRouter(prefix="/api", tags=["clinical"])
 RepositoryDependency = Annotated[
     ClinicalRepositoryProtocol, Depends(require_ready_repository)
+]
+SummaryServiceDependency = Annotated[
+    OnDemandStudySummaryService, Depends(get_summary_service)
 ]
 RetrievalSource = Literal["local_database", "official_cache", "official_api"]
 _detail_requests: dict[tuple[str, str], asyncio.Task[tuple[Study, RetrievalSource]]] = {}
@@ -162,6 +167,44 @@ async def get_trial_detail(
         retrieval_message=retrieval_message,
         screening_coverage=coverage,
     )
+
+
+@router.post(
+    "/trials/{nct_id}/summary",
+    response_model=OnDemandSummaryResponse,
+    responses={404: {"model": ErrorResponse}, 429: {"model": ErrorResponse}, 503: {"model": ErrorResponse}},
+)
+async def generate_trial_summary(
+    nct_id: Annotated[str, Path(pattern=r"^NCT\d{8}$")],
+    repository: RepositoryDependency,
+    service: SummaryServiceDependency,
+) -> OnDemandSummaryResponse | JSONResponse:
+    """Return a validated current-source summary, generating it only on demand."""
+
+    if repository.get_study(nct_id) is None:
+        return _error_response(
+            status_code=404,
+            code="TRIAL_NOT_FOUND",
+            message="The requested trial is not present in the local source snapshot.",
+            details=[ErrorDetail(field="nct_id", reason="not found")],
+            retryable=False,
+        )
+    try:
+        payload, from_cache = await service.summarize_nct_id(nct_id)
+    except SummaryError as exc:
+        limited = "limit reached" in str(exc).casefold()
+        return _error_response(
+            status_code=429 if limited else 503,
+            code="SUMMARY_RATE_LIMITED" if limited else "AI_SUMMARY_UNAVAILABLE",
+            message=(
+                "AI summary generation is temporarily rate-limited. The official study description remains available."
+                if limited
+                else "The AI summary is temporarily unavailable. The official study description remains available."
+            ),
+            details=[],
+            retryable=True,
+        )
+    return OnDemandSummaryResponse(**payload.model_dump(), from_cache=from_cache)
 
 
 async def _get_or_fetch_detail(

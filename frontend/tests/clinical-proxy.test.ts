@@ -1,6 +1,7 @@
 import {afterEach, describe, expect, it, vi} from "vitest";
 
 import {GET as GET_DETAIL} from "../app/api/trials/[nctId]/route";
+import {POST as POST_SUMMARY} from "../app/api/trials/[nctId]/summary/route";
 import {POST} from "../app/api/match/route";
 import {GET} from "../app/api/trials/route";
 
@@ -261,5 +262,64 @@ describe("clinical study detail proxy", () => {
     expect(await response.json()).toEqual(detail);
     expect(String(fetchMock.mock.calls[0][0])).toContain("refresh=true");
     expect(fetchMock.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
+
+describe("clinical study summary proxy", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("forwards an on-demand POST and accepts the strict summary contract", async () => {
+    const payload = {
+      nct_id: "NCT00471978",
+      source_hash: "a".repeat(64),
+      plain_language_summary: "What is this study investigating? A grounded explanation.",
+      from_cache: false,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(payload));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST_SUMMARY(
+      new Request("http://trialmatch.test/api/trials/NCT00471978/summary", {method: "POST"}),
+      {params: Promise.resolve({nctId: "NCT00471978"})},
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(payload);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("api/trials/NCT00471978/summary");
+    expect(fetchMock.mock.calls[0][1].method).toBe("POST");
+    expect(fetchMock.mock.calls[0][1].cache).toBe("no-store");
+    expect(fetchMock.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("rejects malformed summary payloads and preserves safe upstream errors", async () => {
+    const safeError = {
+      error: {
+        code: "AI_SUMMARY_UNAVAILABLE",
+        message: "The AI summary is temporarily unavailable.",
+        details: [],
+        retryable: true,
+        request_id: "summary-request-1",
+      },
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({diagnostic: "private model output"}))
+      .mockResolvedValueOnce(Response.json(safeError, {status: 503}));
+    vi.stubGlobal("fetch", fetchMock);
+    const context = {params: Promise.resolve({nctId: "NCT00471978"})};
+
+    const invalid = await POST_SUMMARY(new Request("http://trialmatch.test", {method: "POST"}), context);
+    const unavailable = await POST_SUMMARY(
+      new Request("http://trialmatch.test", {method: "POST"}),
+      {params: Promise.resolve({nctId: "NCT00471978"})},
+    );
+
+    expect(invalid.status).toBe(502);
+    expect(JSON.stringify(await invalid.json())).not.toContain("private model output");
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toEqual(safeError);
   });
 });

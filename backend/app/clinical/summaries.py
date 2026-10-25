@@ -88,6 +88,8 @@ _EQUIVALENT_WORDS = {
     "visited": {"seen"},
     "treatment": {"therapy"},
     "treatments": {"therapies"},
+    "track": {"collect", "collected", "collecting", "maintain", "maintained", "measure", "measured", "measurements"},
+    "tracks": {"collect", "collected", "collecting", "maintain", "maintained", "measure", "measured", "measurements"},
 }
 
 
@@ -200,8 +202,8 @@ def _structured_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "source_path": {"type": "string"},
-            "quote": {"type": "string"},
+            "source_path": {"type": "string", "description": "Exact supplied field path; 1-200 characters."},
+            "quote": {"type": "string", "description": "Exact source excerpt; 1-500 characters, shortened without alteration when needed."},
         },
         "required": ["source_path", "quote"],
     }
@@ -209,7 +211,7 @@ def _structured_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "text": {"type": "string"},
+            "text": {"type": "string", "description": "One concise statement of 1-180 characters."},
             "evidence": {"type": "array", "items": evidence, "minItems": 1, "maxItems": 3},
         },
         "required": ["text", "evidence"],
@@ -302,7 +304,9 @@ class OpenAISummaryProvider:
                         "one to three exact supporting excerpts and their exact field paths. Use an empty "
                         "statements list when a section is unspecified. Do not infer eligibility, treatment "
                         "effects, procedures, duration, payment, risks, or medical advice. Do not copy long "
-                        "technical descriptions; accurately paraphrase them. Return the identifiers unchanged."
+                        "technical descriptions; accurately paraphrase them. Hard limits: each statement must "
+                        "be at most 180 characters and each exact evidence quote at most 500 characters. Return "
+                        "the identifiers unchanged."
                     ),
                 },
                 {
@@ -508,6 +512,20 @@ def _render_summary(result: StructuredSummary) -> str:
     return "\n\n".join(parts)
 
 
+class _GenerationBudget:
+    """One process-level accepted-generation allowance shared by summary paths."""
+
+    def __init__(self, remaining: int):
+        self.remaining = remaining
+        self.lock = asyncio.Lock()
+
+    async def claim(self) -> None:
+        async with self.lock:
+            if self.remaining <= 0:
+                raise SummaryError("summary generation request limit reached")
+            self.remaining -= 1
+
+
 class StudySummaryService:
     """Validate, cache, coalesce, and bound paid generation for known studies."""
 
@@ -518,14 +536,16 @@ class StudySummaryService:
         *,
         max_concurrency: int = 2,
         max_generation_requests: int = 25,
+        generation_budget: _GenerationBudget | None = None,
     ):
         if max_concurrency < 1 or max_generation_requests < 1:
             raise ValueError("summary generation limits must be positive")
         self.repository = repository
         self.provider = provider
         self._semaphore = asyncio.Semaphore(max_concurrency)
-        self._remaining_requests = max_generation_requests
-        self._request_lock = asyncio.Lock()
+        self._generation_budget = generation_budget or _GenerationBudget(
+            max_generation_requests
+        )
         self._in_flight: dict[str, asyncio.Task[tuple[PlainLanguageSummaryPayload, bool]]] = {}
 
     def cache_key(self, study: Study) -> str:
@@ -571,10 +591,7 @@ class StudySummaryService:
                 return self._validate_cached(study, cached), True
             except SummaryError:
                 pass
-        async with self._request_lock:
-            if self._remaining_requests <= 0:
-                raise SummaryError("summary generation request limit reached")
-            self._remaining_requests -= 1
+        await self._generation_budget.claim()
         async with self._semaphore:
             raw = await self.provider.summarize(study)
         structured = _validate_structured_summary(study, raw)
@@ -700,11 +717,13 @@ class OnDemandStudySummaryService:
         self.repository = repository
         self.provider = provider
         self.official_study_loader = official_study_loader or load_official_study_for_summary
+        shared_budget = _GenerationBudget(max_generation_requests)
         self.summary_service = StudySummaryService(
             repository,
             provider,
             max_concurrency=max_concurrency,
             max_generation_requests=max_generation_requests,
+            generation_budget=shared_budget,
         )
         self.external_repository = _MemorySummaryRepository()
         self.external_summary_service = StudySummaryService(
@@ -712,6 +731,7 @@ class OnDemandStudySummaryService:
             provider,
             max_concurrency=max_concurrency,
             max_generation_requests=max_generation_requests,
+            generation_budget=shared_budget,
         )
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self._in_flight: dict[str, asyncio.Task[tuple[PlainLanguageSummaryPayload, bool]]] = {}
@@ -753,6 +773,15 @@ class OnDemandStudySummaryService:
     async def _load_and_summarize(
         self, nct_id: str
     ) -> tuple[PlainLanguageSummaryPayload, bool]:
+        current = self.repository.get_study(nct_id)
+        if (
+            current is not None
+            and current.detail_status == DetailRetrievalStatus.RETRIEVED
+        ):
+            # A retrieved row retains the complete official record and its canonical
+            # hash. Prefer it so opening a study never performs a redundant registry call.
+            return await self.summary_service.summarize(current)
+
         try:
             study = await self.official_study_loader(nct_id)
         except SummaryError:
@@ -764,8 +793,11 @@ class OnDemandStudySummaryService:
         if study.nct_id != nct_id:
             raise SummaryError("official source returned a different NCT identifier")
 
-        current = self.repository.get_study(nct_id)
-        if current is not None and current.source_hash == study.source_hash:
+        refreshed_current = self.repository.get_study(nct_id)
+        if (
+            refreshed_current is not None
+            and refreshed_current.source_hash == study.source_hash
+        ):
             return await self.summary_service.summarize(study)
 
         self.external_repository.upsert_studies([study])

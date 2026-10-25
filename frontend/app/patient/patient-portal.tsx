@@ -1,6 +1,6 @@
 "use client";
 
-import {FormEvent, useEffect, useMemo, useRef, useState} from "react";
+import {FormEvent, useCallback, useEffect, useMemo, useRef, useState} from "react";
 
 import {SiteHeader} from "../site-header";
 
@@ -10,6 +10,7 @@ import type {
   TrialLocation,
   TrialSearchResponse,
   TrialSummary,
+  TrialSummaryGenerationResponse,
 } from "@/lib/clinical-contracts";
 
 const exampleSearches = ["Breast Cancer", "Heart Failure", "Prostate Cancer", "Colorectal Cancer"];
@@ -36,9 +37,14 @@ export function PatientPortal() {
   const [details, setDetails] = useState<Record<string, TrialDetail>>({});
   const [detailLoading, setDetailLoading] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [generatedSummaries, setGeneratedSummaries] = useState<Record<string, TrialSummaryGenerationResponse>>({});
+  const [summaryLoading, setSummaryLoading] = useState<Record<string, boolean>>({});
+  const [summaryErrors, setSummaryErrors] = useState<Record<string, string | null>>({});
 
   const discoveryHeadingRef = useRef<HTMLHeadingElement>(null);
   const lastFocusedElement = useRef<HTMLElement | null>(null);
+  const summaryCacheRef = useRef(new Map<string, TrialSummaryGenerationResponse>());
+  const summaryRequestsRef = useRef(new Map<string, Promise<void>>());
   const displayedTrials = useMemo(() => sortTrials(trials, sort), [trials, sort]);
 
   async function searchTrials(searchQuery: string, requestedPage = 1, focusResults = true) {
@@ -108,10 +114,58 @@ export function PatientPortal() {
     setLocation("");
   }
 
-  async function openDetails(trial: TrialSummary) {
+  function openDetails(trial: TrialSummary) {
     lastFocusedElement.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setActiveTrial(trial.nct_id);
-    await loadDetails(trial);
+    void loadDetails(trial);
+    void loadSummary(trial.nct_id);
+  }
+
+  function loadSummary(nctId: string): Promise<void> {
+    if (summaryCacheRef.current.has(nctId)) return Promise.resolve();
+    const existingRequest = summaryRequestsRef.current.get(nctId);
+    if (existingRequest) return existingRequest;
+
+    setSummaryLoading((current) => ({...current, [nctId]: true}));
+    setSummaryErrors((current) => ({...current, [nctId]: null}));
+    let request!: Promise<void>;
+    request = (async () => {
+      try {
+        const response = await fetch(`/api/trials/${encodeURIComponent(nctId)}/summary`, {
+          method: "POST",
+          cache: "no-store",
+        });
+        const payload = (await response.json()) as TrialSummaryGenerationResponse | ApiError;
+        if (!response.ok || !("plain_language_summary" in payload)) {
+          throw new Error(errorMessage(payload as ApiError, "AI summary generation failed."));
+        }
+        summaryCacheRef.current.set(nctId, payload);
+        setGeneratedSummaries((current) => ({...current, [nctId]: payload}));
+        setDetails((current) => current[nctId]
+          ? {...current, [nctId]: {...current[nctId], plain_language_summary: payload.plain_language_summary}}
+          : current);
+        setTrials((current) => current.map((item) => item.nct_id === nctId
+          ? {...item, plain_language_summary: payload.plain_language_summary}
+          : item));
+        setKnownTrials((current) => current[nctId]
+          ? {...current, [nctId]: {...current[nctId], plain_language_summary: payload.plain_language_summary}}
+          : current);
+      } catch (reason) {
+        setSummaryErrors((current) => ({
+          ...current,
+          [nctId]: reason instanceof Error
+            ? reason.message
+            : "The AI summary is temporarily unavailable.",
+        }));
+      } finally {
+        setSummaryLoading((current) => ({...current, [nctId]: false}));
+        if (summaryRequestsRef.current.get(nctId) === request) {
+          summaryRequestsRef.current.delete(nctId);
+        }
+      }
+    })();
+    summaryRequestsRef.current.set(nctId, request);
+    return request;
   }
 
   async function loadDetails(trial: TrialSummary, refresh = false) {
@@ -128,23 +182,27 @@ export function PatientPortal() {
       if (!response.ok || !("detail_status" in payload)) {
         throw new Error(errorMessage(payload as ApiError, "Study details could not be loaded."));
       }
-      setDetails((current) => ({...current, [trial.nct_id]: payload}));
+      const generated = summaryCacheRef.current.get(trial.nct_id);
+      const resolvedPayload: TrialDetail = generated
+        ? {...payload, plain_language_summary: generated.plain_language_summary}
+        : payload;
+      setDetails((current) => ({...current, [trial.nct_id]: resolvedPayload}));
       const updated: TrialSummary = {
         ...trial,
-        overall_status: payload.overall_status,
-        conditions: payload.conditions,
-        phases: payload.phases,
-        minimum_age: payload.minimum_age,
-        maximum_age: payload.maximum_age,
-        sex: payload.sex,
-        locations: payload.locations,
-        retrieved_at: payload.retrieved_at,
-        detail_status: payload.detail_status,
-        screening_coverage_status: payload.screening_coverage.status,
-        source_description: payload.source_description,
-        brief_summary: payload.brief_summary,
-        detailed_description: payload.detailed_description,
-        plain_language_summary: payload.plain_language_summary,
+        overall_status: resolvedPayload.overall_status,
+        conditions: resolvedPayload.conditions,
+        phases: resolvedPayload.phases,
+        minimum_age: resolvedPayload.minimum_age,
+        maximum_age: resolvedPayload.maximum_age,
+        sex: resolvedPayload.sex,
+        locations: resolvedPayload.locations,
+        retrieved_at: resolvedPayload.retrieved_at,
+        detail_status: resolvedPayload.detail_status,
+        screening_coverage_status: resolvedPayload.screening_coverage.status,
+        source_description: resolvedPayload.source_description,
+        brief_summary: resolvedPayload.brief_summary,
+        detailed_description: resolvedPayload.detailed_description,
+        plain_language_summary: resolvedPayload.plain_language_summary,
       };
       setTrials((current) => current.map((item) => item.nct_id === trial.nct_id ? updated : item));
       setKnownTrials((current) => ({...current, [trial.nct_id]: updated}));
@@ -155,11 +213,11 @@ export function PatientPortal() {
     }
   }
 
-  function closeDetails() {
+  const closeDetails = useCallback(() => {
     setActiveTrial(null);
     setDetailError(null);
     requestAnimationFrame(() => lastFocusedElement.current?.focus());
-  }
+  }, []);
 
   const activeSummary = activeTrial ? knownTrials[activeTrial] : undefined;
   const activeDetail = activeTrial ? details[activeTrial] : undefined;
@@ -230,7 +288,7 @@ export function PatientPortal() {
         </div>
       </section>
 
-      {activeTrial && activeSummary ? <StudyDetailPanel detail={activeDetail} error={detailError} loading={detailLoading === activeTrial} onClose={closeDetails} onRefresh={() => void loadDetails(activeSummary, true)} summary={activeSummary} /> : null}
+      {activeTrial && activeSummary ? <StudyDetailPanel detail={activeDetail} error={detailError} loading={detailLoading === activeTrial} onClose={closeDetails} onRefresh={() => void loadDetails(activeSummary, true)} onRetrySummary={() => void loadSummary(activeTrial)} summary={activeSummary} summaryError={summaryErrors[activeTrial] ?? null} summaryLoading={summaryLoading[activeTrial] === true} summaryText={generatedSummaries[activeTrial]?.plain_language_summary ?? activeDetail?.plain_language_summary ?? activeSummary.plain_language_summary ?? null} /> : null}
     </main>
   );
 }
@@ -249,7 +307,7 @@ export function TrialCard({trial, onOpen}: {trial: TrialSummary; onOpen: () => v
   </article>;
 }
 
-export function StudyDetailPanel({summary, detail, loading, error, onClose, onRefresh}: {summary: TrialSummary; detail?: TrialDetail; loading: boolean; error: string | null; onClose: () => void; onRefresh: () => void}) {
+export function StudyDetailPanel({summary, detail, loading, error, summaryText, summaryLoading, summaryError, onClose, onRefresh, onRetrySummary}: {summary: TrialSummary; detail?: TrialDetail; loading: boolean; error: string | null; summaryText: string | null; summaryLoading: boolean; summaryError: string | null; onClose: () => void; onRefresh: () => void; onRetrySummary: () => void}) {
   const displayed = detail ?? summary;
   const status = detail?.detail_status ?? summary.detail_status;
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -258,7 +316,7 @@ export function StudyDetailPanel({summary, detail, loading, error, onClose, onRe
   const otherLocations = detail ? partitionLocations(detail.locations).other : [];
   const officialBrief = displayed.brief_summary ?? displayed.source_description;
   const officialDetailed = displayed.detailed_description;
-  const readableDescription = displayed.plain_language_summary ?? officialBrief ?? officialDetailed ?? fallbackStudyExplanation(displayed);
+  const summarySections = summaryText ? parseSummarySections(summaryText) : null;
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
@@ -292,7 +350,19 @@ export function StudyDetailPanel({summary, detail, loading, error, onClose, onRe
   }, [onClose]);
   return <div aria-labelledby="study-detail-title" aria-modal="true" className="fixed inset-0 z-50 flex justify-end bg-ink/60 p-0 backdrop-blur-sm sm:p-4" role="dialog"><button aria-label="Close study details" className="absolute inset-0 cursor-default" onClick={onClose} tabIndex={-1} type="button" /><section className="relative h-full w-full overflow-y-auto bg-canvas shadow-2xl sm:max-w-4xl sm:rounded-3xl" ref={panelRef}><div className="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-slate-200 bg-white/95 px-5 py-4 backdrop-blur sm:px-7"><div className="min-w-0"><p className="text-xs font-bold uppercase tracking-[0.16em] text-accent">Official study details</p><p className="mt-1 truncate text-xs text-slate-500">ClinicalTrials.gov · {summary.nct_id}</p></div><div className="flex shrink-0 items-center gap-2"><a className="hidden rounded-xl bg-accent px-4 py-2.5 text-sm font-bold text-white transition hover:bg-teal-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent sm:inline-flex" href={displayed.source_url} rel="noreferrer" target="_blank">Official record ↗</a><button aria-label="Close study details" className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 text-2xl transition hover:bg-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent" onClick={onClose} ref={closeRef} type="button">×</button></div></div><div className="p-5 sm:p-8">
     {loading ? <DetailSkeleton /> : null}{error ? <Alert message={error} onRetry={onRefresh} /> : null}{!loading ? <><div className="flex flex-wrap gap-2 text-[11px] font-bold uppercase tracking-wide"><span className={`rounded-full px-2.5 py-1 ${statusClass(displayed.overall_status)}`}>{formatRegistryValue(displayed.overall_status)}</span>{displayed.phases.length ? displayed.phases.map((value) => <span className="rounded-full bg-white px-2.5 py-1 text-slate-600 ring-1 ring-slate-200" key={value}>{formatPhase(value)}</span>) : <span className="rounded-full bg-white px-2.5 py-1 text-slate-600 ring-1 ring-slate-200">Phase not specified</span>}</div><h2 className="mt-4 text-2xl font-black leading-tight tracking-[-0.035em] sm:text-4xl" id="study-detail-title">{displayed.title}</h2><p className="mt-3 text-sm leading-6 text-slate-600">{compactConditions(displayed.conditions, 5)}</p><div className="mt-5 flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs font-bold uppercase tracking-wide text-slate-500">Source status</p><p className="mt-1 text-sm font-semibold text-slate-800">{detail?.detail_status === "retrieved" ? `Retrieved from ${formatRetrievalSource(detail.retrieval_source)}` : "Expanded official fields are not yet available"}</p><p className="mt-1 text-xs text-slate-500">Updated in TrialMatch {formatTimestamp(displayed.retrieved_at)}</p></div><a className="inline-flex w-full justify-center rounded-xl bg-accent px-4 py-3 text-sm font-bold text-white transition hover:bg-teal-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent sm:hidden" href={displayed.source_url} rel="noreferrer" target="_blank">View official ClinicalTrials.gov record ↗</a></div><nav aria-label="Study detail sections" className="mt-4 flex gap-2 overflow-x-auto pb-1 text-xs font-bold"><a className="whitespace-nowrap rounded-full bg-white px-3 py-2 ring-1 ring-slate-200 hover:ring-accent" href="#study-eligibility">Eligibility</a><a className="whitespace-nowrap rounded-full bg-white px-3 py-2 ring-1 ring-slate-200 hover:ring-accent" href="#study-interventions">Interventions</a><a className="whitespace-nowrap rounded-full bg-white px-3 py-2 ring-1 ring-slate-200 hover:ring-accent" href="#study-locations">Locations</a><a className="whitespace-nowrap rounded-full bg-white px-3 py-2 ring-1 ring-slate-200 hover:ring-accent" href="#study-contacts">Contacts</a></nav>
-    <section className="mt-7 rounded-2xl border border-emerald-200 bg-white p-5"><p className="text-xs font-bold uppercase tracking-[0.16em] text-accent">What this study is about</p><p className="mt-2 text-sm font-bold text-emerald-950">{displayed.plain_language_summary ? "Cached plain-English summary" : officialBrief || officialDetailed ? "Official study description" : "Source-grounded overview"}</p><p className="mt-2 whitespace-pre-line text-[15px] leading-7 text-slate-700">{readableDescription}</p>{displayed.plain_language_summary ? <p className="mt-2 text-xs leading-5 text-slate-500">Generated on the backend only from this study’s official source description. Verify the original text below.</p> : null}{officialBrief || officialDetailed ? <details className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4"><summary className="cursor-pointer text-sm font-bold text-slate-700">Read the original technical description</summary>{officialBrief ? <div className="mt-4"><p className="text-xs font-bold uppercase tracking-wide text-slate-500">Official brief summary</p><p className="mt-2 whitespace-pre-line text-sm leading-6 text-slate-700">{officialBrief}</p></div> : null}{officialDetailed && officialDetailed !== officialBrief ? <div className="mt-5"><p className="text-xs font-bold uppercase tracking-wide text-slate-500">Official detailed description</p><p className="mt-2 whitespace-pre-line text-sm leading-6 text-slate-700">{officialDetailed}</p></div> : null}</details> : <p className="mt-3 text-xs leading-5 text-slate-500">ClinicalTrials.gov did not supply brief or detailed purpose text; this overview uses only the official title and listed conditions.</p>}</section>
+    <section className="mt-7 rounded-2xl border border-emerald-200 bg-white p-5" aria-labelledby="ai-summary-heading">
+      <p className="text-xs font-bold uppercase tracking-[0.16em] text-accent">Participant overview</p>
+      <h3 className="mt-2 text-lg font-black text-emerald-950" id="ai-summary-heading">AI-generated plain-language explanation</h3>
+      <p className="mt-2 text-xs leading-5 text-slate-500">Generated from this study’s official ClinicalTrials.gov record. This is not medical advice or a verified eligibility decision.</p>
+      <div aria-live="polite" className="mt-4">
+        {summaryLoading ? <div className="rounded-xl bg-emerald-50 p-4 text-sm font-semibold text-emerald-950" role="status">Generating and validating the AI explanation… Official study information remains available below.</div> : null}
+        {summaryError ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950" role="alert"><p>{summaryError}</p><p className="mt-1">Use the original official description below while this feature is unavailable.</p><button className="mt-3 w-full rounded-lg bg-white px-3 py-2 font-bold ring-1 ring-amber-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent sm:w-auto" onClick={onRetrySummary} type="button">Try AI summary again</button></div> : null}
+        {summaryText && summarySections ? <div className="grid gap-3 sm:grid-cols-2">{summarySections.map((section) => <section className="rounded-xl bg-emerald-50/70 p-4" key={section.heading}><h4 className="text-sm font-black text-emerald-950">{section.heading}</h4><p className="mt-2 text-sm leading-6 text-slate-700">{section.body}</p></section>)}</div> : null}
+        {summaryText && !summarySections ? <p className="rounded-xl bg-emerald-50/70 p-4 text-sm leading-6 text-slate-700">{summaryText}</p> : null}
+        {!summaryText && !summaryLoading && !summaryError ? <p className="rounded-xl bg-slate-50 p-4 text-sm leading-6 text-slate-600" role="status">The AI explanation has not loaded. The original official description is available below.</p> : null}
+      </div>
+      {officialBrief || officialDetailed ? <details className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4"><summary className="cursor-pointer text-sm font-bold text-slate-700">Read the original ClinicalTrials.gov description</summary>{officialBrief ? <div className="mt-4"><p className="text-xs font-bold uppercase tracking-wide text-slate-500">Official brief summary</p><p className="mt-2 whitespace-pre-line text-sm leading-6 text-slate-700">{officialBrief}</p></div> : null}{officialDetailed && officialDetailed !== officialBrief ? <div className="mt-5"><p className="text-xs font-bold uppercase tracking-wide text-slate-500">Official detailed description</p><p className="mt-2 whitespace-pre-line text-sm leading-6 text-slate-700">{officialDetailed}</p></div> : null}</details> : <p className="mt-3 text-xs leading-5 text-slate-500">ClinicalTrials.gov did not supply brief or detailed purpose text. No study purpose is inferred.</p>}
+    </section>
     {detail ? <div className={`mt-6 rounded-2xl border p-4 text-sm leading-6 ${detail.detail_status === "retrieved" ? "border-emerald-200 bg-emerald-50 text-emerald-950" : "border-amber-200 bg-amber-50 text-amber-950"}`}><p className="font-bold">{detail.detail_status === "retrieved" ? "Official detail available" : "Official detail unavailable"}</p><p>{detail.retrieval_message}</p></div> : null}
     <div className="mt-7 grid gap-3 sm:grid-cols-3"><InfoPanel title="Age eligibility" value={ageLabel(displayed.minimum_age, displayed.maximum_age, status)} helper="Published source range; not a recommendation." /><InfoPanel title="Phase" value={displayed.phases.length ? displayed.phases.map(formatPhase).join(", ") : "Not specified by source"} helper="Not Applicable is shown when supplied by the source." /><InfoPanel title="Registry sex field" value={sourceValue(displayed.sex, status)} helper="This registry field may not describe gender identity." /></div>
     <section className="mt-8 scroll-mt-24" id="study-eligibility"><p className="text-xs font-bold uppercase tracking-[0.16em] text-accent">Published protocol</p><div className="mt-1 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between"><h3 className="text-xl font-black sm:text-2xl">Eligibility requirements</h3><span className="w-fit rounded-full bg-slate-100 px-3 py-1 text-[11px] font-bold text-slate-600">Published text · not an eligibility decision</span></div>{detail?.detail_status === "retrieved" && detail.eligibility_criteria ? <div className="mt-4 whitespace-pre-line rounded-2xl border border-slate-200 bg-white p-5 text-sm leading-7 text-slate-700 shadow-sm sm:p-6">{detail.eligibility_criteria}</div> : <MissingSource message={status === "retrieved" ? "Eligibility requirements were not specified in the retrieved official record." : "Eligibility requirements are unavailable because expanded official fields have not been retrieved. Missing criteria are never treated as requirements met."} />}</section>
@@ -329,6 +399,28 @@ function fallbackStudyExplanation(trial: Pick<TrialSummary, "title" | "condition
     ? `It is listed for ${trial.conditions.slice(0, 3).join(", ")}${trial.conditions.length > 3 ? ", and other listed conditions" : ""}.`
     : "The official record does not list a condition in the available fields.";
   return `ClinicalTrials.gov lists this research as “${trial.title}.” ${conditionText} A separate study-purpose description was not supplied, so no additional purpose is inferred.`;
+}
+
+const summaryHeadings = [
+  "What is this study investigating?",
+  "What might participation involve?",
+  "Who is the study intended for?",
+  "Important things to know.",
+] as const;
+
+export function parseSummarySections(value: string): Array<{heading: string; body: string}> | null {
+  const starts = summaryHeadings.map((heading) => value.indexOf(heading));
+  if (starts.some((start) => start < 0) || starts.some((start, index) => index > 0 && start <= starts[index - 1])) {
+    return null;
+  }
+  return summaryHeadings.map((heading, index) => {
+    const bodyStart = starts[index] + heading.length;
+    const bodyEnd = index + 1 < starts.length ? starts[index + 1] : value.length;
+    return {
+      heading: heading === "Important things to know." ? "Important things to know" : heading,
+      body: value.slice(bodyStart, bodyEnd).trim(),
+    };
+  });
 }
 
 function sortTrials(trials: TrialSummary[], sort: SortOption): TrialSummary[] { const copy = [...trials]; if (sort === "title") return copy.sort((a, b) => a.title.localeCompare(b.title)); if (sort === "status") return copy.sort((a, b) => a.overall_status.localeCompare(b.overall_status) || a.title.localeCompare(b.title)); if (sort === "ma_sites") return copy.sort((a, b) => maSiteCount(b.locations) - maSiteCount(a.locations) || a.title.localeCompare(b.title)); return copy; }

@@ -285,6 +285,12 @@ class PlainLanguageSummaryPayload(StrictModel):
         return cleaned
 
 
+class OnDemandSummaryResponse(PlainLanguageSummaryPayload):
+    """Validated generated summary plus cache provenance for the requesting client."""
+
+    from_cache: bool
+
+
 class DetailCacheEnvelope(StrictModel):
     schema_version: Literal["trialmatch_ctg_detail_v2"] = "trialmatch_ctg_detail_v2"
     retrieved_at: datetime

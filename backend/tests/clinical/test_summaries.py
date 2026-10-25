@@ -20,6 +20,7 @@ from backend.app.clinical.summaries import (
     OpenAISummaryProvider,
     StudySummaryService,
     SummaryError,
+    _unsupported_material_words,
     summary_provider_from_environment,
 )
 
@@ -253,6 +254,10 @@ async def test_openai_adapter_parses_structured_output_and_retries_transient_fai
         body = json.loads(request.content)
         assert body["model"] == DEFAULT_OPENAI_MODEL
         assert body["response_format"]["type"] == "json_schema"
+        schema = body["response_format"]["json_schema"]["schema"]
+        statement = schema["properties"]["investigating"]["properties"]["statements"]["items"]
+        assert statement["properties"]["text"]["description"].endswith("1-180 characters.")
+        assert "1-500 characters" in statement["properties"]["evidence"]["items"]["properties"]["quote"]["description"]
         assert "supplied_source_fields" in json.loads(body["messages"][1]["content"])
         if calls == 1:
             return httpx.Response(429, request=request)
@@ -531,3 +536,85 @@ async def test_provider_http_attempt_budget_includes_retries():
         with pytest.raises(SummaryError, match="HTTP request limit"):
             await provider.summarize(study)
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_on_demand_uses_complete_local_official_record_without_refetch(tmp_path):
+    repository = ClinicalRepository(tmp_path / "clinical.sqlite3")
+    study = _studies()[0].model_copy(
+        update={"detail_status": DetailRetrievalStatus.RETRIEVED}
+    )
+    repository.upsert_studies([study])
+    provider = FixtureProvider()
+
+    async def unexpected_loader(_nct_id: str):
+        raise AssertionError("complete local records must not be fetched again")
+
+    service = OnDemandStudySummaryService(repository, provider, unexpected_loader)
+    first, first_cached = await service.summarize_nct_id(study.nct_id)
+    second, second_cached = await service.summarize_nct_id(study.nct_id)
+
+    assert first == second
+    assert first_cached is False
+    assert second_cached is True
+    assert provider.calls == 1
+    assert repository.get_current_summary(study.nct_id, study.source_hash) == first.plain_language_summary
+
+
+def test_grounding_accepts_track_only_for_official_collection_or_measurement_wording():
+    assert _unsupported_material_words(
+        "The study tracks arm measurements.",
+        "collecting objective arm measurements in a maintained database",
+    ) == set()
+    unsupported = _unsupported_material_words(
+        "The study tracks treatment benefits.",
+        "collecting objective measurements",
+    )
+    assert "tracks" not in unsupported
+    assert "benefits" in unsupported
+
+
+@pytest.mark.asyncio
+async def test_on_demand_rereads_catalog_after_concurrent_detail_persistence(tmp_path):
+    repository = ClinicalRepository(tmp_path / "clinical.sqlite3")
+    complete = _studies()[0].model_copy(
+        update={"detail_status": DetailRetrievalStatus.RETRIEVED}
+    )
+    indexed = complete.model_copy(
+        update={
+            "source_hash": "0" * 64,
+            "detail_status": DetailRetrievalStatus.NOT_RETRIEVED,
+        }
+    )
+    repository.upsert_studies([indexed])
+    provider = FixtureProvider()
+
+    async def loader(_nct_id: str):
+        repository.upsert_studies([complete])
+        return complete
+
+    service = OnDemandStudySummaryService(repository, provider, loader)
+    payload, from_cache = await service.summarize_nct_id(complete.nct_id)
+
+    assert from_cache is False
+    assert repository.get_current_summary(complete.nct_id, complete.source_hash) == payload.plain_language_summary
+    assert service.external_repository.summaries == {}
+
+
+@pytest.mark.asyncio
+async def test_on_demand_known_and_external_paths_share_one_generation_budget(tmp_path):
+    repository = ClinicalRepository(tmp_path / "clinical.sqlite3")
+    known, external = _studies()[:2]
+    known = known.model_copy(update={"detail_status": DetailRetrievalStatus.RETRIEVED})
+    repository.upsert_studies([known])
+
+    async def loader(nct_id: str):
+        assert nct_id == external.nct_id
+        return external
+
+    service = OnDemandStudySummaryService(
+        repository, FixtureProvider(), loader, max_generation_requests=1
+    )
+    await service.summarize_nct_id(external.nct_id)
+    with pytest.raises(SummaryError, match="request limit"):
+        await service.summarize_nct_id(known.nct_id)

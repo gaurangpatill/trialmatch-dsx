@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
@@ -11,6 +12,11 @@ from dotenv import load_dotenv
 from fastapi import Depends
 
 from .repository import ClinicalRepositoryProtocol, create_repository
+from .summaries import (
+    OnDemandStudySummaryService,
+    SummaryError,
+    summary_provider_from_environment,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DATABASE_URL = "sqlite:///./backend/data/trialmatch.sqlite3"
@@ -31,6 +37,20 @@ class ClinicalRepositoryUnavailable(RuntimeError):
 
 class ClinicalRepositoryNotReady(ClinicalRepositoryUnavailable):
     """The clinical schema exists but has no serving snapshot."""
+
+
+_summary_services: dict[str, OnDemandStudySummaryService] = {}
+_summary_services_lock = threading.Lock()
+
+
+def _positive_environment_int(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError as exc:
+        raise SummaryError(f"{name} must be a positive integer") from exc
+    if value < 1:
+        raise SummaryError(f"{name} must be a positive integer")
+    return value
 
 
 def get_database_url() -> str:
@@ -68,3 +88,23 @@ def require_ready_repository(
             "Clinical storage has no ready serving snapshot"
         )
     return repository
+
+
+def get_summary_service(
+    repository: Annotated[ClinicalRepositoryProtocol, Depends(require_ready_repository)],
+) -> OnDemandStudySummaryService:
+    """Return one bounded summary runtime per configured repository process."""
+
+    with _summary_services_lock:
+        service = _summary_services.get(repository.identity)
+        if service is None:
+            service = OnDemandStudySummaryService(
+                repository,
+                summary_provider_from_environment(),
+                max_concurrency=_positive_environment_int("SUMMARY_MAX_CONCURRENCY", 2),
+                max_generation_requests=_positive_environment_int(
+                    "SUMMARY_MAX_GENERATION_REQUESTS", 25
+                ),
+            )
+            _summary_services[repository.identity] = service
+        return service

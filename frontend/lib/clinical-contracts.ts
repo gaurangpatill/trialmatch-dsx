@@ -83,6 +83,13 @@ export type TrialDetail = {
   screening_coverage: ExtractionCoverage;
 };
 
+export type TrialSummaryGenerationResponse = {
+  nct_id: string;
+  source_hash: string;
+  plain_language_summary: string;
+  from_cache: boolean;
+};
+
 export type TrialSearchResponse = {
   items: TrialSummary[];
   pagination: {

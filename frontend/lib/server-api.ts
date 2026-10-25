@@ -86,6 +86,19 @@ export function isStudyDetailResponse(value: unknown): boolean {
   );
 }
 
+export function isTrialSummaryGenerationResponse(value: unknown): boolean {
+  return (
+    hasExactKeys(value, ["nct_id", "source_hash", "plain_language_summary", "from_cache"]) &&
+    typeof value.nct_id === "string" &&
+    /^NCT\d{8}$/.test(value.nct_id) &&
+    typeof value.source_hash === "string" &&
+    /^[a-f0-9]{64}$/.test(value.source_hash) &&
+    typeof value.plain_language_summary === "string" &&
+    value.plain_language_summary.trim().length > 0 &&
+    typeof value.from_cache === "boolean"
+  );
+}
+
 export function isMatchResponse(value: unknown): boolean {
   if (!hasExactKeys(value, ["profile_id", "results", "disclaimer", "generated_at"])) return false;
   return (
