@@ -9,7 +9,10 @@ from fastapi.testclient import TestClient
 import backend.app.clinical.router as clinical_router
 from backend.app.clinical.client import DetailResult
 from backend.app.clinical.database import ClinicalRepository
-from backend.app.clinical.dependencies import get_repository
+from backend.app.clinical.dependencies import (
+    ClinicalRepositoryUnavailable,
+    get_repository,
+)
 from backend.app.clinical.models import DetailRetrievalStatus
 from backend.app.clinical.normalize import normalize_study, source_structured_criteria
 from backend.app.main import app
@@ -86,8 +89,11 @@ def test_match_contract_and_evidence(study_factory, tmp_path):
     assert result["source_url"] == study.source_url
 
 
-def test_non_synthetic_profile_is_rejected_with_contract_error(tmp_path):
+def test_non_synthetic_profile_is_rejected_with_contract_error(
+    study_factory, tmp_path
+):
     repository = ClinicalRepository(tmp_path / "clinical.sqlite3")
+    repository.upsert_studies([study_factory()])
     payload = {
         "patient": {"profile_id": "real-profile", "synthetic": False},
         "limit": 20,
@@ -101,8 +107,9 @@ def test_non_synthetic_profile_is_rejected_with_contract_error(tmp_path):
     assert response.json()["error"]["retryable"] is False
 
 
-def test_validation_error_uses_shared_envelope(tmp_path):
+def test_validation_error_uses_shared_envelope(study_factory, tmp_path):
     repository = ClinicalRepository(tmp_path / "clinical.sqlite3")
+    repository.upsert_studies([study_factory()])
     with client_with_repository(repository) as client:
         response = client.get("/api/trials", params={"page_size": 101})
     app.dependency_overrides.clear()
@@ -182,10 +189,25 @@ async def test_detail_fetch_is_deduplicated_and_persisted(
                 from_cache=False,
             )
 
+    class ProtocolOnlyRepository:
+        identity = repository.identity
+
+        @property
+        def path(self):
+            raise AssertionError("detail coalescing must use repository identity, not path")
+
+        def __getattr__(self, name):
+            return getattr(repository, name)
+
+    protocol_repository = ProtocolOnlyRepository()
     monkeypatch.setattr(clinical_router, "ClinicalTrialsClient", FakeClient)
     first, second = await asyncio.gather(
-        clinical_router._get_or_fetch_detail(repository, "NCT00000001", refresh=False),
-        clinical_router._get_or_fetch_detail(repository, "NCT00000001", refresh=False),
+        clinical_router._get_or_fetch_detail(
+            protocol_repository, "NCT00000001", refresh=False
+        ),
+        clinical_router._get_or_fetch_detail(
+            protocol_repository, "NCT00000001", refresh=False
+        ),
     )
 
     assert calls == 1
@@ -231,3 +253,38 @@ def test_trial_detail_retrieval_failure_keeps_missing_values_unknown(
     assert body["locations"] == []
     assert "does not mean" not in body["retrieval_message"].lower()
     assert "missing values remain unknown" in body["retrieval_message"].lower()
+
+
+def test_empty_clinical_snapshot_returns_safe_not_ready_error(tmp_path):
+    repository = ClinicalRepository(tmp_path / "clinical.sqlite3")
+
+    with client_with_repository(repository) as client:
+        response = client.get("/api/trials")
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    body = response.json()["error"]
+    assert body["code"] == "CLINICAL_STORAGE_NOT_READY"
+    assert body["retryable"] is True
+    assert body["details"] == []
+
+
+def test_unavailable_clinical_storage_returns_sanitized_error():
+    secret = "postgresql://sensitive-user:sensitive-password@db.invalid/clinical"
+
+    def unavailable():
+        raise ClinicalRepositoryUnavailable(secret)
+
+    app.dependency_overrides[get_repository] = unavailable
+    with TestClient(app) as client:
+        response = client.get("/api/trials")
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    body = response.json()["error"]
+    assert body["code"] == "CLINICAL_STORAGE_UNAVAILABLE"
+    assert body["message"] == "Clinical storage is unavailable."
+    assert body["retryable"] is True
+    assert body["request_id"]
+    assert "sensitive" not in response.text
+    assert "db.invalid" not in response.text

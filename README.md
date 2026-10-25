@@ -10,7 +10,7 @@ TrialMatch is a Hackachusetts 2026 Healthcare & Biotech (H5) research-access pro
 - **Researcher Dashboard:** Explore Massachusetts trial-site distribution and aggregate Environmental Justice indicators.
 - **Recruitment Optimizer:** Select modeled outreach locations under explicit resource constraints. Outputs estimate modeled coverage, not observed enrollment outcomes.
 
-The integrated application includes the clinical discovery/screening API, persisted Massachusetts geography, a condition-independent SciPy MILP outreach optimizer, the Participant Portal, and the Researcher Workspace. Deployment still requires a populated persistent clinical SQLite volume; process health alone does not establish data readiness.
+The integrated application includes the clinical discovery/screening API, persisted Massachusetts geography, a condition-independent SciPy MILP outreach optimizer, the Participant Portal, and the Researcher Workspace. Clinical storage supports SQLite and PostgreSQL through `TRIALMATCH_DATABASE_URL`; schema migration and snapshot population are explicit operations, and process health remains independent of data readiness.
 
 ## Architecture
 
@@ -40,7 +40,7 @@ See [architecture](docs/architecture.md), [API contracts](contracts/api.md), and
 
 - Frontend: Next.js, TypeScript, Tailwind CSS, MapLibre GL JS
 - Backend: Python 3.11, FastAPI, Pydantic
-- Storage/computation: SQLite, pandas, NumPy, SciPy MILP
+- Storage/computation: SQLite or PostgreSQL 17, pandas, NumPy, SciPy MILP
 - Testing: pytest, API/contract tests, property-based tests where meaningful, frontend type/build checks
 - AI: configurable provider, Pydantic-validated structured output, cached extraction, deterministic rule evaluation
 
@@ -64,10 +64,15 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e '.[dev]'
+cp .env.example .env
+python -m backend.app.clinical.cli migrate
+python -m backend.app.clinical.cli readiness  # exits nonzero until studies are populated
 uvicorn backend.app.main:app --reload
 ```
 
-The shared health check is `GET http://localhost:8000/api/health`.
+Backend processes and clinical CLI commands load the repository-root `.env` with `python-dotenv`; an already-exported process variable always takes precedence. When `--database` is omitted, every clinical command uses `TRIALMATCH_DATABASE_URL` and the backend-neutral repository factory. The legacy `--database backend/data/trialmatch.sqlite3` option remains available as an explicit SQLite path override. Normal startup and workload commands never create or migrate clinical storage; run `migrate` explicitly, then populate a complete snapshot.
+
+`GET http://localhost:8000/api/health` reports process liveness and remains independent of storage. `GET http://localhost:8000/api/readiness` returns 200 only when the configured clinical schema is current and contains at least one study; empty or unavailable storage returns a sanitized 503. The equivalent non-secret operator check is `python -m backend.app.clinical.cli readiness`.
 
 ### Frontend
 
@@ -84,7 +89,7 @@ Environment variables are documented in `.env.example`. Copy it to `.env` or the
 - [Render FastAPI and Vercel Next.js deployment](docs/deployment.md)
 - [End-to-end demo/release checklist](docs/release-checklist.md)
 
-Render must use one instance and a persistent `/var/data` disk. The ignored clinical SQLite database is populated by an explicit one-off ingestion command; it is never generated during application startup or committed. Vercel uses same-origin proxying for clinical, geography, and optimizer requests. CI runs the complete backend suite plus frontend tests, typecheck, and production build from clean dependency installs.
+Clinical schema setup and ingestion are explicit one-off commands; neither application startup nor ordinary serving requests create an empty database. Keep runtime credentials only in the deployment environment, verify the configured store with `/api/readiness`, and do not commit generated clinical data. This change does not add or modify deployment configuration. Vercel uses same-origin proxying for clinical, geography, and optimizer requests. CI runs the complete backend suite plus frontend tests, typecheck, and production build from clean dependency installs.
 
 ## Validation
 

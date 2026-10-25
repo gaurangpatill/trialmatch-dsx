@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from backend.app.clinical.client import (
     ClinicalTrialsClient,
+    DetailResult,
     FetchResult,
     InvalidSourcePayloadError,
     PartialFetchError,
@@ -20,7 +21,7 @@ from backend.app.clinical.dependencies import get_repository
 from backend.app.clinical.evaluator import evaluate_criterion
 from backend.app.clinical.extraction import OpenAICompatibleProvider, ProviderUnavailable
 from backend.app.clinical.ingestion import ClinicalIngestionService
-from backend.app.clinical.normalize import source_structured_criteria
+from backend.app.clinical.normalize import normalize_study, source_structured_criteria
 from backend.app.clinical.matching import MatchingService, find_contradictions
 from backend.app.clinical.models import (
     CriterionAttribute,
@@ -153,6 +154,16 @@ class CompleteClient:
     async def fetch_all_recruiting_massachusetts(self, page_size):
         return FetchResult([self.record], 1, 0)
 
+    async def fetch_detail(self, nct_id, **_kwargs):
+        study = normalize_study(self.record)
+        assert nct_id == study.nct_id
+        return DetailResult(
+            record=self.record,
+            retrieved_at=study.retrieved_at,
+            from_cache=False,
+            detail_hash=study.source_hash,
+        )
+
     def list_query_url(self, page_size):
         return f"https://clinicaltrials.gov/api/v2/studies?pageSize={page_size}"
 
@@ -165,12 +176,16 @@ async def test_partial_refresh_preserves_previous_snapshot_and_records_runtime_q
     repository.upsert_studies([study_factory("NCT00000002")])
     report = await ClinicalIngestionService(
         PartialClient(source_record_factory("NCT00000001")), repository
-    ).ingest(page_size=500, detail_limit=0)
+    ).ingest(page_size=500)
 
     studies, total = repository.search_studies()
     assert total == 1
     assert studies[0].nct_id == "NCT00000002"
     assert report.pagination_completed is False
+    assert report.index_retrieved_at is not None
+    assert report.started_at <= report.index_retrieved_at <= report.completed_at
+    assert report.published_at is None
+    assert report.publication_completed is False
     assert report.effective_page_size == 500
     assert report.source_url.endswith("pageSize=500")
 
@@ -191,7 +206,7 @@ async def test_complete_refresh_clears_removed_source_structured_criteria(
 
     report = await ClinicalIngestionService(
         CompleteClient(record_without_criteria), repository
-    ).ingest(detail_limit=0)
+    ).ingest(checkpoint_path=tmp_path / "checkpoint.json")
 
     assert report.pagination_completed is True
     assert repository.get_criteria(old.nct_id) == []
@@ -296,8 +311,9 @@ def test_remote_llm_provider_requires_https():
     assert provider.base_url.startswith("http://127.0.0.1")
 
 
-def test_synthetic_declaration_is_not_coerced(tmp_path):
+def test_synthetic_declaration_is_not_coerced(study_factory, tmp_path):
     repository = ClinicalRepository(tmp_path / "clinical.sqlite3")
+    repository.upsert_studies([study_factory()])
     app.dependency_overrides[get_repository] = lambda: repository
     with TestClient(app) as client:
         response = client.post(
@@ -309,8 +325,9 @@ def test_synthetic_declaration_is_not_coerced(tmp_path):
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
-def test_unknown_requested_trial_returns_404_contract_error(tmp_path):
+def test_unknown_requested_trial_returns_404_contract_error(study_factory, tmp_path):
     repository = ClinicalRepository(tmp_path / "clinical.sqlite3")
+    repository.upsert_studies([study_factory("NCT00000001")])
     app.dependency_overrides[get_repository] = lambda: repository
     with TestClient(app) as client:
         response = client.post(
@@ -355,7 +372,9 @@ async def test_exclusion_bearing_refresh_is_partial_and_does_not_publish(
         return FetchResult([client.record, invalid], 1, 0)
 
     client.fetch_all_recruiting_massachusetts = fetch_with_invalid
-    report = await ClinicalIngestionService(client, repository).ingest(detail_limit=0)
+    report = await ClinicalIngestionService(client, repository).ingest(
+        checkpoint_path=tmp_path / "checkpoint.json"
+    )
 
     studies, total = repository.search_studies()
     assert report.status.value == "partial"

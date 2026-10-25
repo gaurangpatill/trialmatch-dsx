@@ -14,6 +14,8 @@ dependencies = [
   "numpy==2.2.4",
   "pandas==2.2.3",
   "pydantic==2.10.6",
+  "psycopg[binary]==3.3.6",
+  "python-dotenv==1.2.4",
   "scipy==1.15.2",
   "uvicorn[standard]==0.34.0",
 ]
@@ -27,6 +29,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["backend*"]
+
+[tool.setuptools.package-data]
+"backend.app.clinical.migrations" = ["*.sql"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"

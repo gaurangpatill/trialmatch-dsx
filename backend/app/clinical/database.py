@@ -1,4 +1,4 @@
-"""SQLite persistence for normalized studies, provenance, and extraction caches."""
+"""SQLite persistence and backend-neutral clinical repository contracts."""
 
 from __future__ import annotations
 
@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS ingestion_runs (
     effective_page_size INTEGER NOT NULL DEFAULT 20,
     pagination_completed INTEGER NOT NULL DEFAULT 0,
     started_at TEXT NOT NULL,
+    index_retrieved_at TEXT,
+    published_at TEXT,
     completed_at TEXT NOT NULL,
     status TEXT NOT NULL,
     page_count INTEGER NOT NULL,
@@ -59,7 +61,25 @@ CREATE TABLE IF NOT EXISTS ingestion_runs (
     excluded_records_json TEXT NOT NULL,
     errors_json TEXT NOT NULL,
     detail_requested_count INTEGER NOT NULL,
-    detail_retrieved_count INTEGER NOT NULL
+    detail_retrieved_count INTEGER NOT NULL,
+    index_retrieved_count INTEGER NOT NULL DEFAULT 0,
+    detail_cache_hit_count INTEGER NOT NULL DEFAULT 0,
+    detail_network_count INTEGER NOT NULL DEFAULT 0,
+    detail_resumed_count INTEGER NOT NULL DEFAULT 0,
+    detail_failed_count INTEGER NOT NULL DEFAULT 0,
+    incomplete_detail_ids_json TEXT NOT NULL DEFAULT '[]',
+    ma_verified_count INTEGER NOT NULL DEFAULT 0,
+    ma_unverified_count INTEGER NOT NULL DEFAULT 0,
+    ma_unverified_records_json TEXT NOT NULL DEFAULT '[]',
+    request_count INTEGER NOT NULL DEFAULT 0,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    rate_limited_count INTEGER NOT NULL DEFAULT 0,
+    cohort_fingerprint TEXT,
+    checkpoint_resumed INTEGER NOT NULL DEFAULT 0,
+    publication_attempted INTEGER NOT NULL DEFAULT 0,
+    publication_completed INTEGER NOT NULL DEFAULT 0,
+    published_record_count INTEGER NOT NULL DEFAULT 0,
+    previous_snapshot_preserved INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS criteria (
@@ -118,10 +138,16 @@ ON summary_cache(nct_id, source_hash, created_at);
 class ClinicalRepository:
     """Small connection-per-operation repository suitable for one-process SQLite use."""
 
-    def __init__(self, database_path: str | Path):
+    def __init__(self, database_path: str | Path, *, initialize_schema: bool = True):
         self.path = Path(database_path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.initialize()
+        self.identity = f"sqlite:{self.path.resolve()}"
+        if initialize_schema:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.initialize()
+        elif not self.path.is_file():
+            raise RuntimeError(
+                "SQLite clinical database is unavailable; initialize it explicitly first"
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -194,14 +220,35 @@ class ClinicalRepository:
             columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(ingestion_runs)")
             }
-            if "effective_page_size" not in columns:
-                connection.execute(
-                    "ALTER TABLE ingestion_runs ADD COLUMN effective_page_size INTEGER NOT NULL DEFAULT 20"
-                )
-            if "pagination_completed" not in columns:
-                connection.execute(
-                    "ALTER TABLE ingestion_runs ADD COLUMN pagination_completed INTEGER NOT NULL DEFAULT 0"
-                )
+            ingestion_columns = {
+                "effective_page_size": "INTEGER NOT NULL DEFAULT 20",
+                "pagination_completed": "INTEGER NOT NULL DEFAULT 0",
+                "index_retrieved_at": "TEXT",
+                "published_at": "TEXT",
+                "index_retrieved_count": "INTEGER NOT NULL DEFAULT 0",
+                "detail_cache_hit_count": "INTEGER NOT NULL DEFAULT 0",
+                "detail_network_count": "INTEGER NOT NULL DEFAULT 0",
+                "detail_resumed_count": "INTEGER NOT NULL DEFAULT 0",
+                "detail_failed_count": "INTEGER NOT NULL DEFAULT 0",
+                "incomplete_detail_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+                "ma_verified_count": "INTEGER NOT NULL DEFAULT 0",
+                "ma_unverified_count": "INTEGER NOT NULL DEFAULT 0",
+                "ma_unverified_records_json": "TEXT NOT NULL DEFAULT '[]'",
+                "request_count": "INTEGER NOT NULL DEFAULT 0",
+                "retry_count": "INTEGER NOT NULL DEFAULT 0",
+                "rate_limited_count": "INTEGER NOT NULL DEFAULT 0",
+                "cohort_fingerprint": "TEXT",
+                "checkpoint_resumed": "INTEGER NOT NULL DEFAULT 0",
+                "publication_attempted": "INTEGER NOT NULL DEFAULT 0",
+                "publication_completed": "INTEGER NOT NULL DEFAULT 0",
+                "published_record_count": "INTEGER NOT NULL DEFAULT 0",
+                "previous_snapshot_preserved": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for column, definition in ingestion_columns.items():
+                if column not in columns:
+                    connection.execute(
+                        f"ALTER TABLE ingestion_runs ADD COLUMN {column} {definition}"
+                    )
             cache_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(extraction_cache)")
             }
@@ -249,9 +296,47 @@ class ClinicalRepository:
         ]
 
     @staticmethod
+    def _invalidate_changed_sources(
+        connection: sqlite3.Connection, payloads: list[tuple[Any, ...]]
+    ) -> None:
+        """Delete derived outputs only when an accepted source version changes."""
+
+        if not payloads:
+            return
+        identifiers = [str(payload[0]) for payload in payloads]
+        placeholders = ",".join("?" for _ in identifiers)
+        existing = {
+            row["nct_id"]: row
+            for row in connection.execute(
+                f"SELECT nct_id, source_hash, detail_status FROM studies "
+                f"WHERE nct_id IN ({placeholders})",
+                identifiers,
+            ).fetchall()
+        }
+        changed_ids = [
+            str(payload[0])
+            for payload in payloads
+            if (row := existing.get(str(payload[0]))) is not None
+            and row["source_hash"] != payload[16]
+            and not (
+                row["detail_status"] == DetailRetrievalStatus.RETRIEVED.value
+                and payload[18] != DetailRetrievalStatus.RETRIEVED.value
+            )
+        ]
+        if not changed_ids:
+            return
+        changed_placeholders = ",".join("?" for _ in changed_ids)
+        for table in ("criteria", "extraction_cache", "summary_cache"):
+            connection.execute(
+                f"DELETE FROM {table} WHERE nct_id IN ({changed_placeholders})",
+                changed_ids,
+            )
+
+    @staticmethod
     def _upsert_on_connection(
         connection: sqlite3.Connection, payloads: list[tuple[Any, ...]]
     ) -> None:
+        ClinicalRepository._invalidate_changed_sources(connection, payloads)
         connection.executemany(
             """
             INSERT INTO studies (
@@ -370,7 +455,17 @@ class ClinicalRepository:
         study_by_id = {study.nct_id: study for study in studies_list}
         if len(study_by_id) != len(studies_list):
             raise ValueError("complete snapshot contains duplicate NCT identifiers")
-        criteria = [item for values in source_criteria.values() for item in values]
+        flattened = [item for values in source_criteria.values() for item in values]
+        criteria: list[StructuredCriterion] = []
+        seen_criteria: dict[str, StructuredCriterion] = {}
+        for criterion in flattened:
+            previous = seen_criteria.get(criterion.criterion_id)
+            if previous is not None and previous == criterion:
+                # Deterministically generated criteria can be repeated by callers;
+                # publishing the same identity and payload remains idempotent.
+                continue
+            seen_criteria[criterion.criterion_id] = criterion
+            criteria.append(criterion)
         for criterion in criteria:
             study = study_by_id.get(criterion.nct_id)
             if study is None:
@@ -380,32 +475,53 @@ class ClinicalRepository:
             if criterion.source_hash != study.source_hash:
                 raise ValueError("source criterion hash must match its study")
         identifiers = [(study.nct_id,) for study in studies_list]
+        incoming_expanded = {
+            study.nct_id
+            for study in studies_list
+            if study.detail_status == DetailRetrievalStatus.RETRIEVED
+        }
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("CREATE TEMP TABLE published_snapshot_ids (nct_id TEXT PRIMARY KEY)")
-            connection.execute("CREATE TEMP TABLE expanded_snapshot_ids (nct_id TEXT PRIMARY KEY)")
             connection.executemany(
                 "INSERT INTO published_snapshot_ids (nct_id) VALUES (?)", identifiers
             )
+            existing_expanded = {
+                row["nct_id"]
+                for row in connection.execute(
+                    """
+                    SELECT studies.nct_id
+                    FROM studies
+                    JOIN published_snapshot_ids USING (nct_id)
+                    WHERE studies.detail_status = 'retrieved'
+                    """
+                ).fetchall()
+            }
+            preserved_expanded = existing_expanded - incoming_expanded
+            replace_identifiers = [
+                (study.nct_id,)
+                for study in studies_list
+                if study.nct_id not in preserved_expanded
+            ]
+            connection.execute(
+                "CREATE TEMP TABLE replace_source_criteria_ids (nct_id TEXT PRIMARY KEY)"
+            )
             connection.executemany(
-                "INSERT INTO expanded_snapshot_ids (nct_id) VALUES (?)",
-                [
-                    (study.nct_id,)
-                    for study in studies_list
-                    if study.detail_status == DetailRetrievalStatus.RETRIEVED
-                ],
+                "INSERT INTO replace_source_criteria_ids (nct_id) VALUES (?)",
+                replace_identifiers,
             )
             self._upsert_on_connection(connection, payloads)
             connection.execute(
                 "DELETE FROM studies WHERE nct_id NOT IN (SELECT nct_id FROM published_snapshot_ids)"
             )
-            # A list-only snapshot must not erase source-structured rules belonging to a
-            # previously expanded record that the upsert deliberately preserved.
+            # Replace every accepted generation idempotently. A narrow list-only
+            # refresh still preserves criteria for an older expanded row whose source
+            # payload is deliberately retained by the study upsert.
             connection.execute(
                 """
                 DELETE FROM criteria
                 WHERE extraction_method = 'source_structured'
-                  AND nct_id IN (SELECT nct_id FROM expanded_snapshot_ids)
+                  AND nct_id IN (SELECT nct_id FROM replace_source_criteria_ids)
                 """
             )
             connection.executemany(
@@ -418,10 +534,18 @@ class ClinicalRepository:
                         criterion.model_dump_json(),
                     )
                     for criterion in criteria
+                    if criterion.nct_id not in preserved_expanded
                 ],
             )
             connection.commit()
         return len(payloads)
+
+    def _database_datetime(self, value: datetime | None) -> datetime | str | None:
+        """Encode datetimes for SQLite TEXT while preserving PostgreSQL codecs."""
+
+        if value is None or self.identity.startswith("postgresql:"):
+            return value
+        return value.isoformat()
 
     def save_ingestion_report(self, report: IngestionReport) -> None:
         with closing(self._connect()) as connection:
@@ -429,17 +553,29 @@ class ClinicalRepository:
                 """
                 INSERT INTO ingestion_runs (
                     source_url, effective_page_size, pagination_completed,
-                    started_at, completed_at, status, page_count,
+                    started_at, index_retrieved_at, published_at, completed_at,
+                    status, page_count,
                     raw_record_count, accepted_record_count, duplicate_identifier_count,
                     missing_value_counts_json, excluded_records_json, errors_json,
-                    detail_requested_count, detail_retrieved_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    detail_requested_count, detail_retrieved_count,
+                    index_retrieved_count, detail_cache_hit_count, detail_network_count,
+                    detail_resumed_count, detail_failed_count, incomplete_detail_ids_json,
+                    ma_verified_count, ma_unverified_count, ma_unverified_records_json,
+                    request_count, retry_count, rate_limited_count, cohort_fingerprint,
+                    checkpoint_resumed, publication_attempted, publication_completed,
+                    published_record_count, previous_snapshot_preserved
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     report.source_url,
                     report.effective_page_size,
                     int(report.pagination_completed),
                     report.started_at.isoformat(),
+                    self._database_datetime(report.index_retrieved_at),
+                    self._database_datetime(report.published_at),
                     report.completed_at.isoformat(),
                     report.status.value,
                     report.page_count,
@@ -451,6 +587,24 @@ class ClinicalRepository:
                     json.dumps(report.errors),
                     report.detail_requested_count,
                     report.detail_retrieved_count,
+                    report.index_retrieved_count,
+                    report.detail_cache_hit_count,
+                    report.detail_network_count,
+                    report.detail_resumed_count,
+                    report.detail_failed_count,
+                    json.dumps(report.incomplete_detail_ids),
+                    report.ma_verified_count,
+                    report.ma_unverified_count,
+                    json.dumps(report.ma_unverified_records, sort_keys=True),
+                    report.request_count,
+                    report.retry_count,
+                    report.rate_limited_count,
+                    report.cohort_fingerprint,
+                    int(report.checkpoint_resumed),
+                    int(report.publication_attempted),
+                    int(report.publication_completed),
+                    report.published_record_count,
+                    int(report.previous_snapshot_preserved),
                 ),
             )
             connection.commit()
@@ -549,8 +703,23 @@ class ClinicalRepository:
 
     def latest_retrieved_at(self) -> datetime | None:
         with closing(self._connect()) as connection:
-            row = connection.execute("SELECT MAX(retrieved_at) AS value FROM studies").fetchone()
-        return datetime.fromisoformat(row["value"]) if row and row["value"] else None
+            published = connection.execute(
+                """
+                SELECT index_retrieved_at AS value
+                FROM ingestion_runs
+                WHERE publication_completed = 1
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if published is None:
+                published = connection.execute(
+                    "SELECT MAX(retrieved_at) AS value FROM studies"
+                ).fetchone()
+        value = published["value"] if published else None
+        if value is None or isinstance(value, datetime):
+            return value
+        return datetime.fromisoformat(value)
 
     def replace_criteria(self, nct_id: str, method: str, criteria: list[StructuredCriterion]) -> None:
         if any(criterion.extraction_method != method for criterion in criteria):
@@ -651,9 +820,16 @@ class ClinicalRepository:
                 )
             connection.execute(
                 """
-                INSERT OR REPLACE INTO extraction_cache (
+                INSERT INTO extraction_cache (
                     cache_key, nct_id, source_hash, provider, model, payload_json, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    nct_id=excluded.nct_id,
+                    source_hash=excluded.source_hash,
+                    provider=excluded.provider,
+                    model=excluded.model,
+                    payload_json=excluded.payload_json,
+                    created_at=excluded.created_at
                 """,
                 (
                     cache_key,
@@ -860,10 +1036,19 @@ class ClinicalRepository:
                 raise ValueError("cannot publish summary for a stale or missing study")
             connection.execute(
                 """
-                INSERT OR REPLACE INTO summary_cache (
+                INSERT INTO summary_cache (
                     cache_key, nct_id, source_hash, provider, model,
                     schema_version, prompt_version, payload_json, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    nct_id=excluded.nct_id,
+                    source_hash=excluded.source_hash,
+                    provider=excluded.provider,
+                    model=excluded.model,
+                    schema_version=excluded.schema_version,
+                    prompt_version=excluded.prompt_version,
+                    payload_json=excluded.payload_json,
+                    created_at=excluded.created_at
                 """,
                 (
                     cache_key,
@@ -882,6 +1067,79 @@ class ClinicalRepository:
                 (nct_id, cache_key),
             )
             connection.commit()
+
+    def schema_ready(self) -> bool:
+        """Return whether the expected schema is present and queryable."""
+
+        required = {
+            "studies",
+            "ingestion_runs",
+            "criteria",
+            "extraction_cache",
+            "extraction_attempts",
+            "summary_cache",
+        }
+        try:
+            with closing(self._connect()) as connection:
+                rows = connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+        except sqlite3.Error:
+            return False
+        return required.issubset({row["name"] for row in rows})
+
+    def record_counts(self) -> dict[str, int]:
+        """Return non-sensitive row counts used by readiness diagnostics."""
+
+        counts: dict[str, int] = {}
+        with closing(self._connect()) as connection:
+            for table in (
+                "studies",
+                "ingestion_runs",
+                "criteria",
+                "extraction_cache",
+                "extraction_attempts",
+                "summary_cache",
+            ):
+                counts[table] = int(
+                    connection.execute(f"SELECT COUNT(*) AS value FROM {table}").fetchone()[
+                        "value"
+                    ]
+                )
+        return counts
+
+    def data_ready(self) -> bool:
+        """Return whether a non-empty serving snapshot exists."""
+
+        try:
+            return self.record_counts()["studies"] > 0
+        except sqlite3.Error:
+            return False
+
+    def storage_stats(self) -> dict[str, Any]:
+        """Return backend, schema, data, counts, and allocated storage statistics."""
+
+        with closing(self._connect()) as connection:
+            page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+            latest = connection.execute(
+                """
+                SELECT status, pagination_completed, completed_at,
+                       index_retrieved_at, published_at
+                FROM ingestion_runs
+                WHERE publication_completed = 1
+                ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+        counts = self.record_counts()
+        return {
+            "backend": "sqlite",
+            "schema_ready": self.schema_ready(),
+            "data_ready": counts["studies"] > 0,
+            "counts": counts,
+            "storage_bytes": page_count * page_size,
+            "latest_ingestion": dict(latest) if latest else None,
+        }
 
     @staticmethod
     def _row_to_study(row: sqlite3.Row) -> Study:

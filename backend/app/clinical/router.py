@@ -12,9 +12,9 @@ from fastapi import APIRouter, Depends, Path, Query
 from fastapi.responses import JSONResponse
 
 from .client import ClinicalTrialsClient
-from .database import ClinicalRepository
-from .dependencies import get_repository
+from .dependencies import require_ready_repository
 from .matching import MatchingService, UnknownTrialIds, extraction_coverage
+from .repository import ClinicalRepositoryProtocol
 from .models import (
     DataFreshness,
     DetailRetrievalStatus,
@@ -34,7 +34,9 @@ from .normalize import normalize_study, source_structured_criteria
 
 
 router = APIRouter(prefix="/api", tags=["clinical"])
-RepositoryDependency = Annotated[ClinicalRepository, Depends(get_repository)]
+RepositoryDependency = Annotated[
+    ClinicalRepositoryProtocol, Depends(require_ready_repository)
+]
 RetrievalSource = Literal["local_database", "official_cache", "official_api"]
 _detail_requests: dict[tuple[str, str], asyncio.Task[tuple[Study, RetrievalSource]]] = {}
 
@@ -163,14 +165,14 @@ async def get_trial_detail(
 
 
 async def _get_or_fetch_detail(
-    repository: ClinicalRepository,
+    repository: ClinicalRepositoryProtocol,
     nct_id: str,
     *,
     refresh: bool,
 ) -> tuple[Study, RetrievalSource]:
     """Deduplicate concurrent detail requests for one database and NCT identifier."""
 
-    key = (str(repository.path.resolve()), nct_id)
+    key = (repository.identity, nct_id)
     task = _detail_requests.get(key)
     if task is None:
         task = asyncio.create_task(_fetch_and_store_detail(repository, nct_id, refresh=refresh))
@@ -183,7 +185,7 @@ async def _get_or_fetch_detail(
 
 
 async def _fetch_and_store_detail(
-    repository: ClinicalRepository,
+    repository: ClinicalRepositoryProtocol,
     nct_id: str,
     *,
     refresh: bool,

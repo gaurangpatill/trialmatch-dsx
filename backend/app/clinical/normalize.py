@@ -20,6 +20,7 @@ from .models import (
     StructuredCriterion,
     Study,
     StudyContact,
+    StudyIntervention,
     StudyLocation,
 )
 
@@ -87,12 +88,28 @@ def normalize_study(
         and ("eligibilityModule" in protocol or "descriptionModule" in protocol)
         else DetailRetrievalStatus.NOT_RETRIEVED
     )
+    source_status = source.protocol.status
+    posted_update = source_status.last_update_post_date_struct
     return Study(
         nct_id=identification.nct_id,
         title=(identification.official_title or identification.brief_title).strip(),
         overall_status=status.strip(),
         conditions=[value.strip() for value in source.protocol.conditions.conditions if value.strip()],
         phases=[normalize_phase(value) for value in source.protocol.design.phases if value.strip()],
+        source_last_updated=(
+            posted_update.date if posted_update and posted_update.date else source_status.last_update_submit_date
+        ),
+        status_verified_date=source_status.status_verified_date,
+        study_type=source.protocol.design.study_type,
+        interventions=[
+            StudyIntervention(
+                intervention_type=item.intervention_type,
+                name=item.name,
+                description=item.description,
+                other_names=item.other_names,
+            )
+            for item in source.protocol.arms_interventions.interventions
+        ],
         source_description=_source_description(
             source.protocol.description.brief_summary,
             source.protocol.description.detailed_description,
@@ -237,3 +254,21 @@ def _age_to_years(value: str | None) -> float | None:
     if unit.startswith("week"):
         return number / 52.1429
     return number / 365.2425
+
+
+def is_massachusetts_state(value: str | None) -> bool:
+    """Return whether the source explicitly labels a location as Massachusetts."""
+
+    if value is None:
+        return False
+    return " ".join(value.casefold().split()) in {"ma", "massachusetts"}
+
+
+def verify_massachusetts_location(study: Study) -> tuple[bool, str]:
+    """Verify cohort geography without discarding other sites or facility statuses."""
+
+    if not study.locations:
+        return False, "detail has no source locations"
+    if any(is_massachusetts_state(location.state) for location in study.locations):
+        return True, "explicit Massachusetts location present"
+    return False, "detail has no explicitly labeled Massachusetts location"

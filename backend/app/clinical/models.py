@@ -43,10 +43,24 @@ class SourceIdentification(BaseModel):
     official_title: str | None = Field(default=None, alias="officialTitle")
 
 
+class SourceDateStruct(BaseModel):
+    """ClinicalTrials.gov date structure preserved at source precision."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    date: str | None = None
+    date_type: str | None = Field(default=None, alias="type")
+
+
 class SourceStatus(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     overall_status: str | None = Field(default=None, alias="overallStatus")
+    status_verified_date: str | None = Field(default=None, alias="statusVerifiedDate")
+    last_update_submit_date: str | None = Field(default=None, alias="lastUpdateSubmitDate")
+    last_update_post_date_struct: SourceDateStruct | None = Field(
+        default=None, alias="lastUpdatePostDateStruct"
+    )
 
 
 class SourceDescription(BaseModel):
@@ -66,6 +80,22 @@ class SourceDesign(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     phases: list[str] = Field(default_factory=list)
+    study_type: str | None = Field(default=None, alias="studyType")
+
+
+class SourceIntervention(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    intervention_type: str | None = Field(default=None, alias="type")
+    name: str | None = None
+    description: str | None = None
+    other_names: list[str] = Field(default_factory=list, alias="otherNames")
+
+
+class SourceArmsInterventions(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    interventions: list[SourceIntervention] = Field(default_factory=list)
 
 
 class SourceEligibility(BaseModel):
@@ -123,6 +153,9 @@ class SourceProtocol(BaseModel):
     )
     conditions: SourceConditions = Field(default_factory=SourceConditions, alias="conditionsModule")
     design: SourceDesign = Field(default_factory=SourceDesign, alias="designModule")
+    arms_interventions: SourceArmsInterventions = Field(
+        default_factory=SourceArmsInterventions, alias="armsInterventionsModule"
+    )
     eligibility: SourceEligibility = Field(default_factory=SourceEligibility, alias="eligibilityModule")
     contacts_locations: SourceContactsLocations = Field(
         default_factory=SourceContactsLocations, alias="contactsLocationsModule"
@@ -162,12 +195,25 @@ class StudyContact(StrictModel):
     facility: str | None = None
 
 
+class StudyIntervention(StrictModel):
+    """Official intervention metadata without inferred classifications."""
+
+    intervention_type: str | None = None
+    name: str | None = None
+    description: str | None = None
+    other_names: list[str] = Field(default_factory=list)
+
+
 class Study(StrictModel):
     nct_id: str = Field(pattern=r"^NCT\d{8}$")
     title: str = Field(min_length=1)
     overall_status: str = Field(min_length=1)
     conditions: list[str] = Field(default_factory=list)
     phases: list[str] = Field(default_factory=list)
+    source_last_updated: str | None = None
+    status_verified_date: str | None = None
+    study_type: str | None = None
+    interventions: list[StudyIntervention] = Field(default_factory=list)
     source_description: str | None = None
     brief_summary: str | None = None
     detailed_description: str | None = None
@@ -185,6 +231,45 @@ class Study(StrictModel):
     detail_attempted_at: datetime | None = None
     detail_error_code: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def restore_internal_source_metadata(cls, value: Any) -> Any:
+        """Restore non-column metadata from the persisted official raw payload."""
+
+        if not isinstance(value, dict) or not isinstance(value.get("raw_source"), dict):
+            return value
+        restored = dict(value)
+        protocol = restored["raw_source"].get("protocolSection", {})
+        if not isinstance(protocol, dict):
+            return restored
+        status = protocol.get("statusModule", {})
+        design = protocol.get("designModule", {})
+        arms = protocol.get("armsInterventionsModule", {})
+        if isinstance(status, dict):
+            posted = status.get("lastUpdatePostDateStruct")
+            restored.setdefault(
+                "source_last_updated",
+                posted.get("date") if isinstance(posted, dict) else status.get("lastUpdateSubmitDate"),
+            )
+            restored.setdefault("status_verified_date", status.get("statusVerifiedDate"))
+        if isinstance(design, dict):
+            restored.setdefault("study_type", design.get("studyType"))
+        if isinstance(arms, dict) and isinstance(arms.get("interventions"), list):
+            restored.setdefault(
+                "interventions",
+                [
+                    {
+                        "intervention_type": item.get("type"),
+                        "name": item.get("name"),
+                        "description": item.get("description"),
+                        "other_names": item.get("otherNames", []),
+                    }
+                    for item in arms["interventions"]
+                    if isinstance(item, dict)
+                ],
+            )
+        return restored
+
 
 class PlainLanguageSummaryPayload(StrictModel):
     nct_id: str = Field(pattern=r"^NCT\d{8}$")
@@ -200,6 +285,44 @@ class PlainLanguageSummaryPayload(StrictModel):
         return cleaned
 
 
+class DetailCacheEnvelope(StrictModel):
+    schema_version: Literal["trialmatch_ctg_detail_v2"] = "trialmatch_ctg_detail_v2"
+    retrieved_at: datetime
+    source_url: str
+    nct_id: str = Field(pattern=r"^NCT\d{8}$")
+    expected_overall_status: str | None = None
+    expected_last_update: str | None = None
+    index_record_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    detail_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    study: dict[str, Any]
+
+
+class IngestionCheckpoint(StrictModel):
+    schema_version: Literal["trialmatch_ctg_ingestion_checkpoint_v1"] = (
+        "trialmatch_ctg_ingestion_checkpoint_v1"
+    )
+    cohort_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    query_url: str
+    expected_ids: list[str]
+    completed_detail_hashes: dict[str, str] = Field(default_factory=dict)
+    started_at: datetime
+    updated_at: datetime
+    publication_completed: bool = False
+
+    @model_validator(mode="after")
+    def checkpoint_ids_reconcile(self) -> IngestionCheckpoint:
+        if self.expected_ids != sorted(set(self.expected_ids)):
+            raise ValueError("checkpoint expected_ids must be sorted and unique")
+        if not set(self.completed_detail_hashes).issubset(self.expected_ids):
+            raise ValueError("checkpoint completed IDs must belong to the expected cohort")
+        if any(
+            len(value) != 64 or any(character not in "0123456789abcdef" for character in value)
+            for value in self.completed_detail_hashes.values()
+        ):
+            raise ValueError("checkpoint detail hashes must be lowercase SHA-256 values")
+        return self
+
+
 class IngestionStatus(str, Enum):
     COMPLETE = "complete"
     PARTIAL = "partial"
@@ -211,6 +334,8 @@ class IngestionReport(StrictModel):
     effective_page_size: int = Field(ge=1, le=1000)
     pagination_completed: bool
     started_at: datetime
+    index_retrieved_at: datetime | None = None
+    published_at: datetime | None = None
     completed_at: datetime
     status: IngestionStatus
     page_count: int = Field(ge=0)
@@ -222,6 +347,52 @@ class IngestionReport(StrictModel):
     errors: list[str]
     detail_requested_count: int = Field(ge=0)
     detail_retrieved_count: int = Field(ge=0)
+    index_retrieved_count: int = Field(default=0, ge=0)
+    detail_cache_hit_count: int = Field(default=0, ge=0)
+    detail_network_count: int = Field(default=0, ge=0)
+    detail_resumed_count: int = Field(default=0, ge=0)
+    detail_failed_count: int = Field(default=0, ge=0)
+    incomplete_detail_ids: list[str] = Field(default_factory=list)
+    ma_verified_count: int = Field(default=0, ge=0)
+    ma_unverified_count: int = Field(default=0, ge=0)
+    ma_unverified_records: list[dict[str, str]] = Field(default_factory=list)
+    request_count: int = Field(default=0, ge=0)
+    retry_count: int = Field(default=0, ge=0)
+    rate_limited_count: int = Field(default=0, ge=0)
+    cohort_fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    checkpoint_resumed: bool = False
+    publication_attempted: bool = False
+    publication_completed: bool = False
+    published_record_count: int = Field(default=0, ge=0)
+    previous_snapshot_preserved: bool = False
+
+    @model_validator(mode="after")
+    def reliability_counts_reconcile(self) -> IngestionReport:
+        if self.detail_cache_hit_count + self.detail_network_count != self.detail_retrieved_count:
+            raise ValueError("cache and network detail counts must equal retrieved details")
+        if self.detail_resumed_count > self.detail_cache_hit_count:
+            raise ValueError("resumed details must be validated cache hits")
+        if self.detail_failed_count != len(self.incomplete_detail_ids):
+            raise ValueError("failed detail count must equal incomplete detail IDs")
+        if self.ma_unverified_count != len(self.ma_unverified_records):
+            raise ValueError("MA unverified count must equal MA unverified records")
+        if self.publication_completed:
+            if self.index_retrieved_at is None or self.published_at is None:
+                raise ValueError(
+                    "completed publication requires index retrieval and publication timestamps"
+                )
+            if self.published_at < self.index_retrieved_at:
+                raise ValueError("publication timestamp cannot precede index retrieval")
+            if self.status != IngestionStatus.COMPLETE:
+                raise ValueError("completed publication requires complete status")
+            if self.published_record_count != self.accepted_record_count:
+                raise ValueError("complete publication must contain the accepted cohort")
+        else:
+            if self.published_at is not None:
+                raise ValueError("incomplete publication cannot have a publication timestamp")
+            if self.published_record_count:
+                raise ValueError("incomplete publication cannot report published records")
+        return self
 
 
 class CriterionClassification(str, Enum):

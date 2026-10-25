@@ -13,6 +13,7 @@ from pydantic import Field, model_validator
 
 from .database import ClinicalRepository
 from .models import StrictModel, Study
+from .normalize import is_massachusetts_state
 
 
 SOURCE_COORDINATE_LABEL = "ClinicalTrials.gov API v2 geoPoint"
@@ -60,7 +61,7 @@ class TrialSiteRecord(StrictModel):
             raise ValueError("unresolved coordinates cannot claim coordinate provenance")
         if not self.facility_name.strip():
             raise ValueError("facility_name must not be blank")
-        if _normalize(self.state) not in {"ma", "massachusetts"}:
+        if not is_massachusetts_state(self.state):
             raise ValueError("site must be explicitly located in Massachusetts")
         return self
 
@@ -178,7 +179,7 @@ def build_site_export(
         retrieved_times.append(study.retrieved_at)
         for location in raw_locations:
             source_location_count += 1
-            if _normalize(_string(location.get("state"))) not in {"ma", "massachusetts"}:
+            if not is_massachusetts_state(_string(location.get("state"))):
                 continue
             ma_location_count += 1
             if _normalize(_string(location.get("status"))) != "recruiting":

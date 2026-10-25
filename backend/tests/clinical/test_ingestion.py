@@ -83,6 +83,7 @@ async def test_transient_source_error_retries(source_record_factory, tmp_path):
             http_client=http_client,
             cache_dir=tmp_path,
             max_retries=1,
+            min_request_interval_seconds=0,
             sleep=sleep,
         ) as client:
             result = await client.fetch_all_recruiting_massachusetts()

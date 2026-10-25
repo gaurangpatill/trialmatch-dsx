@@ -1,0 +1,3 @@
+ALTER TABLE ingestion_runs
+    ADD COLUMN IF NOT EXISTS index_retrieved_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ;
