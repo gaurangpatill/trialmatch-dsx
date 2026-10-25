@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Literal
@@ -46,6 +48,24 @@ SummaryServiceDependency = Annotated[
 ]
 RetrievalSource = Literal["local_database", "official_cache", "official_api"]
 _detail_requests: dict[tuple[str, str], asyncio.Task[tuple[Study, RetrievalSource]]] = {}
+
+
+def _development_summary_log(
+    nct_id: str,
+    stage: str,
+    elapsed_ms: int,
+    http_status: int | str,
+    category: str,
+) -> None:
+    if os.getenv("TRIALMATCH_ENV", "development").casefold() in {"development", "dev", "local"}:
+        logger.warning(
+            "clinical_summary nct_id=%s stage=%s elapsed_ms=%s http_status=%s category=%s",
+            nct_id,
+            stage,
+            elapsed_ms,
+            http_status,
+            category,
+        )
 
 
 @router.get("/trials", response_model=TrialSearchResponse)
@@ -181,29 +201,33 @@ async def generate_trial_summary(
     repository: RepositoryDependency,
     service: SummaryServiceDependency,
 ) -> OnDemandSummaryResponse | JSONResponse:
-    """Return a validated current-source summary, generating it only on demand."""
+    """Fetch and explain any valid ClinicalTrials.gov study on demand."""
 
-    if repository.get_study(nct_id) is None:
-        return _error_response(
-            status_code=404,
-            code="TRIAL_NOT_FOUND",
-            message="The requested trial is not present in the local source snapshot.",
-            details=[ErrorDetail(field="nct_id", reason="not found")],
-            retryable=False,
-        )
+    started = time.perf_counter()
+    _development_summary_log(nct_id, "request_received", 0, "pending", "none")
     try:
         payload, from_cache = await service.summarize_nct_id(nct_id)
     except SummaryError as exc:
         category = _summary_error_category(exc)
-        logger.warning("AI summary failed for %s; category=%s", nct_id, category)
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
         limited = category == "generation_limit"
+        status_code = 429 if limited else 503
+        _development_summary_log(nct_id, "failed", elapsed_ms, status_code, category)
         return _error_response(
-            status_code=429 if limited else 503,
+            status_code=status_code,
             code="SUMMARY_RATE_LIMITED" if limited else "AI_SUMMARY_UNAVAILABLE",
             message="AI explanation is temporarily unavailable. You can still read the official study description.",
             details=[],
             retryable=True,
         )
+    elapsed_ms = round((time.perf_counter() - started) * 1000)
+    _development_summary_log(
+        nct_id,
+        "complete",
+        elapsed_ms,
+        200,
+        "cache_hit" if from_cache else "fresh_generation",
+    )
     return OnDemandSummaryResponse(**payload.model_dump(), from_cache=from_cache)
 
 

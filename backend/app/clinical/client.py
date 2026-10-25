@@ -373,22 +373,26 @@ class ClinicalTrialsClient:
             raise InvalidSourcePayloadError(f"invalid detail payload for {nct_id}: {exc}") from exc
         retrieved_at = datetime.now(UTC)
         detail_hash = _canonical_hash(record)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        envelope = DetailCacheEnvelope(
-            retrieved_at=retrieved_at,
-            source_url=f"{self.base_url}/studies/{nct_id}",
-            nct_id=nct_id,
-            expected_overall_status=expected_overall_status or parsed.protocol.status.overall_status,
-            expected_last_update=(
-                expected_last_update
-                if expected_last_update is not None
-                else self._source_last_update(parsed)
-            ),
-            index_record_hash=expected_index_hash,
-            detail_hash=detail_hash,
-            study=record,
-        )
-        _atomic_write(cache_path, envelope.model_dump_json())
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            envelope = DetailCacheEnvelope(
+                retrieved_at=retrieved_at,
+                source_url=f"{self.base_url}/studies/{nct_id}",
+                nct_id=nct_id,
+                expected_overall_status=expected_overall_status or parsed.protocol.status.overall_status,
+                expected_last_update=(
+                    expected_last_update
+                    if expected_last_update is not None
+                    else self._source_last_update(parsed)
+                ),
+                index_record_hash=expected_index_hash,
+                detail_hash=detail_hash,
+                study=record,
+            )
+            _atomic_write(cache_path, envelope.model_dump_json())
+        except OSError:
+            # The official response is usable even when the optional filesystem cache is not.
+            pass
         return DetailResult(
             record=record,
             retrieved_at=retrieved_at,

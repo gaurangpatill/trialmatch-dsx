@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
@@ -23,6 +26,7 @@ SCHEMA_VERSION = "4.0"
 PROMPT_VERSION = "4.0"
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+logger = logging.getLogger(__name__)
 _RETRYABLE_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
 _SECTION_ORDER = (
     ("investigating", "What is this study investigating?"),
@@ -50,6 +54,21 @@ _SOURCE_MODULES = (
 
 class SummaryError(RuntimeError):
     """Safe summary-generation failure without provider secrets or response bodies."""
+
+
+def _development_log(nct_id: str, stage: str, started: float, status: str, category: str) -> None:
+    """Emit concise local pipeline diagnostics without source content or credentials."""
+
+    if os.getenv("TRIALMATCH_ENV", "development").casefold() not in {"development", "dev", "local"}:
+        return
+    logger.warning(
+        "clinical_summary nct_id=%s stage=%s elapsed_ms=%s http_status=%s category=%s",
+        nct_id,
+        stage,
+        round((time.perf_counter() - started) * 1000),
+        status,
+        category,
+    )
 
 
 class GeneratedExplanation(BaseModel):
@@ -402,12 +421,17 @@ class StudySummaryService:
             self._in_flight.pop(key, None)
 
     async def _summarize_once(self, study: Study, key: str) -> tuple[PlainLanguageSummaryPayload, bool]:
+        started = time.perf_counter()
         cached = self.cached(study)
         if cached is not None:
+            _development_log(study.nct_id, "summary_cache_read", started, "200", "cache_hit")
             return cached, True
+        _development_log(study.nct_id, "summary_cache_read", started, "miss", "cache_miss")
         await self._generation_budget.claim()
+        provider_started = time.perf_counter()
         async with self._semaphore:
             explanation = await self.provider.summarize(study)
+        _development_log(study.nct_id, "openai_complete", provider_started, "200", "usable_output")
         if not isinstance(explanation, str) or not explanation.strip():
             raise SummaryError("OpenAI returned an empty explanation")
         payload = PlainLanguageSummaryPayload(
@@ -427,16 +451,26 @@ class StudySummaryService:
                 payload=payload.model_dump(mode="json"),
                 created_at=datetime.now(UTC),
             )
-        except Exception:
+            _development_log(study.nct_id, "summary_cache_write", started, "200", "stored")
+        except Exception as exc:
+            _development_log(
+                study.nct_id,
+                "summary_cache_write",
+                started,
+                "ignored",
+                f"{type(exc).__name__}_nonblocking",
+            )
             # Cache availability is secondary; a usable generated explanation must be returned.
-            pass
         return payload, False
 
 
 class _MemorySummaryRepository:
-    def __init__(self) -> None:
+    """Isolated cache for official studies outside the imported discovery snapshot."""
+
+    def __init__(self, cache_dir: str | Path | None = None) -> None:
         self.studies: dict[str, Study] = {}
         self.summaries: dict[str, dict[str, Any]] = {}
+        self.cache_dir = Path(cache_dir) if cache_dir else None
 
     def get_study(self, nct_id: str) -> Study | None:
         return self.studies.get(nct_id)
@@ -447,10 +481,32 @@ class _MemorySummaryRepository:
         return len(studies)
 
     def get_cached_summary(self, cache_key: str) -> dict[str, Any] | None:
-        return self.summaries.get(cache_key)
+        cached = self.summaries.get(cache_key)
+        if cached is not None or self.cache_dir is None:
+            return cached
+        path = self.cache_dir / f"{cache_key}.json"
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        self.summaries[cache_key] = payload
+        return payload
 
     def publish_summary(self, **kwargs: Any) -> None:
-        self.summaries[str(kwargs["cache_key"])] = dict(kwargs["payload"])
+        cache_key = str(kwargs["cache_key"])
+        payload = dict(kwargs["payload"])
+        self.summaries[cache_key] = payload
+        if self.cache_dir is None:
+            return
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        temporary = self.cache_dir / f".{cache_key}.{os.getpid()}.tmp"
+        try:
+            temporary.write_text(json.dumps(payload, sort_keys=True))
+            temporary.replace(self.cache_dir / f"{cache_key}.json")
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 async def load_official_study_for_summary(nct_id: str) -> Study:
@@ -477,6 +533,7 @@ class OnDemandStudySummaryService:
         *,
         max_concurrency: int = 2,
         max_generation_requests: int = 25,
+        external_cache_dir: str | Path | None = None,
     ):
         self.repository = repository
         self.provider = provider
@@ -489,7 +546,11 @@ class OnDemandStudySummaryService:
             max_generation_requests=max_generation_requests,
             generation_budget=budget,
         )
-        self.external_repository = _MemorySummaryRepository()
+        self.external_repository = _MemorySummaryRepository(
+            external_cache_dir
+            if external_cache_dir is not None
+            else os.getenv("SUMMARY_EXTERNAL_CACHE_DIR", "backend/data/cache/summaries")
+        )
         self.external_summary_service = StudySummaryService(
             self.external_repository,
             provider,
@@ -504,10 +565,16 @@ class OnDemandStudySummaryService:
         if re.fullmatch(r"NCT\d{8}", nct_id) is None:
             raise SummaryError("invalid NCT identifier")
 
-        current = self.repository.get_study(nct_id)
+        started = time.perf_counter()
+        try:
+            current = self.repository.get_study(nct_id)
+        except Exception as exc:
+            current = None
+            _development_log(nct_id, "summary_cache_read", started, "ignored", f"{type(exc).__name__}_nonblocking")
         if current is not None:
             cached = self.summary_service.cached(current)
             if cached is not None:
+                _development_log(nct_id, "summary_cache_read", started, "200", "cache_hit")
                 return cached, True
         if isinstance(self.provider, DisabledSummaryProvider):
             raise SummaryError(f"LLM provider is disabled; on-demand generation is unavailable for {nct_id}")
@@ -525,18 +592,40 @@ class OnDemandStudySummaryService:
 
     async def _bounded_load_and_summarize(self, nct_id: str) -> tuple[PlainLanguageSummaryPayload, bool]:
         async with self._semaphore:
+            source_started = time.perf_counter()
             try:
                 study = await self.official_study_loader(nct_id)
             except SummaryError:
                 raise
             except Exception as exc:
+                _development_log(
+                    nct_id,
+                    "official_study_fetch",
+                    source_started,
+                    "failed",
+                    type(exc).__name__,
+                )
                 raise SummaryError(f"official study retrieval failed: {type(exc).__name__}") from exc
             if study.nct_id != nct_id:
                 raise SummaryError("official source returned a different NCT identifier")
+            _development_log(nct_id, "official_study_fetch", source_started, "200", "retrieved")
 
-            current = self.repository.get_study(nct_id)
+            try:
+                current = self.repository.get_study(nct_id)
+            except Exception as exc:
+                current = None
+                _development_log(
+                    nct_id,
+                    "summary_cache_read",
+                    source_started,
+                    "ignored",
+                    f"{type(exc).__name__}_nonblocking",
+                )
             if current is not None and current.source_hash == study.source_hash:
                 return await self.summary_service.summarize(study)
+
+            # Keep arbitrary official records outside the imported discovery snapshot while
+            # persisting their summaries in an isolated cache when local storage is writable.
             self.external_repository.upsert_studies([study])
             return await self.external_summary_service.summarize(study)
 

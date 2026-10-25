@@ -113,17 +113,17 @@ describe("participant study discovery and details", () => {
     const loadingHtml = renderToStaticMarkup(
       <StudyDetailPanel summary={summary} detail={detail} loading={false} error={null} summaryText={null} summaryLoading={true} summaryError={null} onClose={() => undefined} onRefresh={() => undefined} onRetrySummary={() => undefined} />,
     );
-    expect(loadingHtml).toContain("Generating and validating the AI explanation");
+    expect(loadingHtml).toContain("Generating the AI explanation");
     expect(loadingHtml).toContain("Official brief summary");
 
     const errorHtml = renderToStaticMarkup(
       <StudyDetailPanel summary={summary} detail={detail} loading={false} error={null} summaryText={summary.plain_language_summary ?? null} summaryLoading={false} summaryError="AI explanation is temporarily unavailable. You can still read the official study description." onClose={() => undefined} onRefresh={() => undefined} onRetrySummary={() => undefined} />,
     );
-    expect(errorHtml).toContain("Try AI summary again");
-    expect(errorHtml).toContain("AI explanation is temporarily unavailable");
-    expect(errorHtml).toContain("You can still read the official study description");
+    expect(errorHtml).not.toContain("Try AI summary again");
+    expect(errorHtml).not.toContain("AI explanation is temporarily unavailable");
+    expect(errorHtml).not.toContain("You can still read the official study description");
     expect(errorHtml).toContain("What is this study investigating?");
-    expect(errorHtml).toContain("Use the original official description");
+    expect(errorHtml).not.toContain("Use the original official description");
     expect(errorHtml).toContain("Official detailed description");
     expect(parseSummarySections("unexpected legacy text")).toBeNull();
   });

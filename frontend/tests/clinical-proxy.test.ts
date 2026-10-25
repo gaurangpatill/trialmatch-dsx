@@ -322,6 +322,18 @@ describe("clinical study summary proxy", () => {
     expect(unavailable.status).toBe(503);
     expect(await unavailable.json()).toEqual(safeError);
 
+    fetchMock.mockResolvedValueOnce(Response.json({
+      nct_id: "NCT99999999",
+      source_hash: "b".repeat(64),
+      plain_language_summary: "A summary for the wrong study.",
+      from_cache: false,
+    }));
+    const mismatched = await POST_SUMMARY(
+      new Request("http://trialmatch.test", {method: "POST"}),
+      {params: Promise.resolve({nctId: "NCT00471978"})},
+    );
+    expect(mismatched.status).toBe(502);
+
     fetchMock.mockResolvedValueOnce(
       Response.json({detail: "unstructured backend failure"}, {status: 503}),
     );

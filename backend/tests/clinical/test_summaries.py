@@ -378,3 +378,63 @@ async def test_summary_cli_refuses_more_than_three_or_duplicate_ids(tmp_path, ca
     )
     assert await run_summarize(too_many) == 2
     assert await run_summarize(duplicate) == 2
+
+
+@pytest.mark.asyncio
+async def test_on_demand_nonlocal_study_uses_isolated_persistent_cache(tmp_path):
+    repository = ClinicalRepository(tmp_path / "clinical.sqlite3")
+    study = _studies()[1].model_copy(update={"detail_status": DetailRetrievalStatus.RETRIEVED})
+    provider = FixtureProvider()
+    loader_calls = 0
+    cache_dir = tmp_path / "external-summaries"
+
+    async def loader(nct_id: str):
+        nonlocal loader_calls
+        loader_calls += 1
+        assert nct_id == study.nct_id
+        return study
+
+    first_service = OnDemandStudySummaryService(
+        repository, provider, loader, external_cache_dir=cache_dir
+    )
+    first, first_cached = await first_service.summarize_nct_id(study.nct_id)
+    restarted_service = OnDemandStudySummaryService(
+        repository, provider, loader, external_cache_dir=cache_dir
+    )
+    second, second_cached = await restarted_service.summarize_nct_id(study.nct_id)
+
+    assert first.nct_id == study.nct_id
+    assert first_cached is False
+    assert second == first
+    assert second_cached is True
+    assert loader_calls == 2
+    assert provider.calls == 1
+    assert repository.get_study(study.nct_id) is None
+
+
+@pytest.mark.asyncio
+async def test_cache_read_failure_falls_back_to_fresh_generation(tmp_path):
+    inner = ClinicalRepository(tmp_path / "clinical.sqlite3")
+    study = _studies()[0]
+
+    class ReadFailingRepository:
+        identity = inner.identity
+
+        def __getattr__(self, name):
+            return getattr(inner, name)
+
+        def get_study(self, _nct_id):
+            raise RuntimeError("cache unavailable")
+
+    provider = FixtureProvider()
+
+    async def loader(_nct_id: str):
+        return study
+
+    payload, from_cache = await OnDemandStudySummaryService(
+        ReadFailingRepository(), provider, loader, external_cache_dir=tmp_path / "summaries"
+    ).summarize_nct_id(study.nct_id)
+
+    assert from_cache is False
+    assert payload.nct_id == study.nct_id
+    assert provider.calls == 1

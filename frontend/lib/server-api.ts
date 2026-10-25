@@ -86,11 +86,12 @@ export function isStudyDetailResponse(value: unknown): boolean {
   );
 }
 
-export function isTrialSummaryGenerationResponse(value: unknown): boolean {
+export function isTrialSummaryGenerationResponse(value: unknown, expectedNctId?: string): boolean {
   return (
     hasExactKeys(value, ["nct_id", "source_hash", "plain_language_summary", "from_cache"]) &&
     typeof value.nct_id === "string" &&
     /^NCT\d{8}$/.test(value.nct_id) &&
+    (expectedNctId === undefined || value.nct_id === expectedNctId) &&
     typeof value.source_hash === "string" &&
     /^[a-f0-9]{64}$/.test(value.source_hash) &&
     typeof value.plain_language_summary === "string" &&

@@ -117,12 +117,16 @@ export function PatientPortal() {
   function openDetails(trial: TrialSummary) {
     lastFocusedElement.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setActiveTrial(trial.nct_id);
+    setSummaryErrors((current) => ({...current, [trial.nct_id]: null}));
     void loadDetails(trial);
     void loadSummary(trial.nct_id);
   }
 
   function loadSummary(nctId: string): Promise<void> {
-    if (summaryCacheRef.current.has(nctId)) return Promise.resolve();
+    if (summaryCacheRef.current.has(nctId)) {
+      setSummaryErrors((current) => ({...current, [nctId]: null}));
+      return Promise.resolve();
+    }
     const existingRequest = summaryRequestsRef.current.get(nctId);
     if (existingRequest) return existingRequest;
 
@@ -139,7 +143,11 @@ export function PatientPortal() {
         if (!response.ok || !("plain_language_summary" in payload)) {
           throw new Error(errorMessage(payload as ApiError, "AI summary generation failed."));
         }
+        if (payload.nct_id !== nctId || !payload.plain_language_summary.trim()) {
+          throw new Error("The AI summary response did not match the selected study.");
+        }
         summaryCacheRef.current.set(nctId, payload);
+        setSummaryErrors((current) => ({...current, [nctId]: null}));
         setGeneratedSummaries((current) => ({...current, [nctId]: payload}));
         setDetails((current) => current[nctId]
           ? {...current, [nctId]: {...current[nctId], plain_language_summary: payload.plain_language_summary}}
@@ -151,12 +159,14 @@ export function PatientPortal() {
           ? {...current, [nctId]: {...current[nctId], plain_language_summary: payload.plain_language_summary}}
           : current);
       } catch (reason) {
-        setSummaryErrors((current) => ({
-          ...current,
-          [nctId]: reason instanceof Error
-            ? reason.message
-            : "AI explanation is temporarily unavailable. You can still read the official study description.",
-        }));
+        if (!summaryCacheRef.current.has(nctId)) {
+          setSummaryErrors((current) => ({
+            ...current,
+            [nctId]: reason instanceof Error
+              ? reason.message
+              : "AI explanation is temporarily unavailable. You can still read the official study description.",
+          }));
+        }
       } finally {
         setSummaryLoading((current) => ({...current, [nctId]: false}));
         if (summaryRequestsRef.current.get(nctId) === request) {
@@ -355,8 +365,8 @@ export function StudyDetailPanel({summary, detail, loading, error, summaryText, 
       <h3 className="mt-2 text-lg font-black text-emerald-950" id="ai-summary-heading">AI-generated plain-language explanation</h3>
       <p className="mt-2 text-xs leading-5 text-slate-500">AI-generated explanation based on ClinicalTrials.gov study information. Verify details with the research team. This is not medical advice or a verified eligibility decision.</p>
       <div aria-live="polite" className="mt-4">
-        {summaryLoading ? <div className="rounded-xl bg-emerald-50 p-4 text-sm font-semibold text-emerald-950" role="status">Generating and validating the AI explanation… Official study information remains available below.</div> : null}
-        {summaryError ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950" role="alert"><p>{summaryError}</p><p className="mt-1">Use the original official description below while this feature is unavailable.</p><button className="mt-3 w-full rounded-lg bg-white px-3 py-2 font-bold ring-1 ring-amber-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent sm:w-auto" onClick={onRetrySummary} type="button">Try AI summary again</button></div> : null}
+        {summaryLoading && !summaryText ? <div className="rounded-xl bg-emerald-50 p-4 text-sm font-semibold text-emerald-950" role="status">Generating the AI explanation… Official study information remains available below.</div> : null}
+        {summaryError && !summaryText ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950" role="alert"><p>{summaryError}</p><p className="mt-1">Use the original official description below while this feature is unavailable.</p><button className="mt-3 w-full rounded-lg bg-white px-3 py-2 font-bold ring-1 ring-amber-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent sm:w-auto" onClick={onRetrySummary} type="button">Try AI summary again</button></div> : null}
         {summaryText && summarySections ? <div className="grid gap-3 sm:grid-cols-2">{summarySections.map((section) => <section className="rounded-xl bg-emerald-50/70 p-4" key={section.heading}><h4 className="text-sm font-black text-emerald-950">{section.heading}</h4><p className="mt-2 text-sm leading-6 text-slate-700">{section.body}</p></section>)}</div> : null}
         {summaryText && !summarySections ? <p className="rounded-xl bg-emerald-50/70 p-4 text-sm leading-6 text-slate-700">{summaryText}</p> : null}
         {!summaryText && !summaryLoading && !summaryError ? <p className="rounded-xl bg-slate-50 p-4 text-sm leading-6 text-slate-600" role="status">The AI explanation has not loaded. The original official description is available below.</p> : null}

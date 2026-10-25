@@ -301,7 +301,6 @@ def test_on_demand_summary_endpoint_returns_cache_provenance(study_factory, tmp_
         async def summarize_nct_id(self, nct_id):
             nonlocal calls
             calls += 1
-            assert nct_id == study.nct_id
             return (
                 PlainLanguageSummaryPayload(
                     nct_id=nct_id,
@@ -328,8 +327,9 @@ def test_on_demand_summary_endpoint_returns_cache_provenance(study_factory, tmp_
     assert first.json()["from_cache"] is False
     assert second.status_code == 200
     assert second.json()["from_cache"] is True
-    assert missing.status_code == 404
-    assert missing.json()["error"]["code"] == "TRIAL_NOT_FOUND"
+    assert missing.status_code == 200
+    assert missing.json()["nct_id"] == "NCT99999999"
+    assert calls == 3
 
 
 def test_on_demand_summary_endpoint_sanitizes_provider_failure(study_factory, tmp_path, caplog):
